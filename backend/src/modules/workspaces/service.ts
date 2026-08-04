@@ -19,10 +19,11 @@ export async function createWorkspace(
 }
 
 export async function getWorkspaces(ownerId: string) {
-  return db.query.workspaces.findMany({
-    where: eq(workspaces.ownerId, ownerId),
-    orderBy: [desc(workspaces.createdAt)],
-  });
+  return db
+    .select()
+    .from(workspaces)
+    .where(eq(workspaces.ownerId, ownerId))
+    .orderBy(desc(workspaces.createdAt));
 }
 export async function getWorkspaceById(
   id: string,

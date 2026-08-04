@@ -30,16 +30,8 @@ router.get(
   "/workspace/:workspaceId",
   requireAuth,
   async (c) => {
-    const workspaceId = c.req.param("workspaceId");
+    const workspaceId = c.req.param("workspaceId")!;
 
-    if (!workspaceId) {
-      return c.json(
-        {
-          message: "Workspace id is required",
-        },
-        400
-      );
-    }
     const user = c.get("user");
     const canvases = await getCanvasesByWorkspace(
       workspaceId,
@@ -53,16 +45,7 @@ router.get(
 router.get("/:id", requireAuth, async (c) => {
   const user = c.get("user");
 
-  const id = c.req.param("id");
-
-  if (!id) {
-    return c.json(
-      {
-        message: "Canvas id is required",
-      },
-      400
-    );
-  }
+  const id = c.req.param("id")!;
 
   const canvas = await getCanvasById(id, user.id);
 
@@ -85,16 +68,7 @@ router.patch(
   async (c) => {
     const user = c.get("user");
 
-    const id = c.req.param("id");
-
-    if (!id) {
-      return c.json(
-        {
-          message: "Canvas id is required",
-        },
-        400
-      );
-    }
+    const id = c.req.param("id")!;
 
     const { name } = c.req.valid("json");
 
@@ -120,16 +94,7 @@ router.patch(
 router.delete("/:id", requireAuth, async (c) => {
   const user = c.get("user");
 
-  const id = c.req.param("id");
-
-  if (!id) {
-    return c.json(
-      {
-        message: "Canvas id is required",
-      },
-      400
-    );
-  }
+  const id = c.req.param("id")!;
 
   const canvas = await deleteCanvas(
     id,
@@ -155,16 +120,7 @@ router.patch(
   async (c) => {
     const user = c.get("user");
 
-    const id = c.req.param("id");
-
-    if (!id) {
-      return c.json(
-        {
-          message: "Canvas id is required",
-        },
-        400
-      );
-    }
+    const id = c.req.param("id")!;
 
     const { content } = c.req.valid("json");
 

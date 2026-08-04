@@ -2,7 +2,7 @@ import { Outlet } from "@tanstack/react-router";
 import { Box, Toolbar } from "@mui/material";
 
 import Sidebar from "../Sidebar";
-import TopBar from "../layouts/DashboardLayout";
+import TopBar from "../TopBar";
 
 const drawerWidth = 240;
 

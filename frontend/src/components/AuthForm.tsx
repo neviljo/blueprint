@@ -29,6 +29,59 @@ import { useNavigate } from "@tanstack/react-router";
 import { authApi } from "../lib/api";
 import { clearSessionCache } from "../lib/auth";
 
+const textFieldSx = {
+  "& .MuiOutlinedInput-root": {
+    bgcolor: "#121212",
+    color: "#ECECEC",
+    borderRadius: 2,
+    "& fieldset": { borderColor: "#3F3F3F" },
+    "&:hover fieldset": { borderColor: "#555" },
+    "&.Mui-focused fieldset": { borderColor: "#ECECEC" },
+  },
+  "& input": { py: "10px", fontSize: "0.92rem" },
+};
+
+interface FormData {
+  fullName: string;
+  email: string;
+  password: string;
+  confirmPassword: string;
+  rememberMe: boolean;
+  agreeTerms: boolean;
+}
+
+function validateForm(formData: FormData, mode: "signin" | "signup"): string | null {
+  const email = formData.email.trim();
+
+  if (!email || !formData.password.trim()) {
+    return "Please fill in all required fields.";
+  }
+
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return "Please enter a valid email address.";
+  }
+
+  if (mode === "signup") {
+    if (formData.password.length < 8) {
+      return "Password must be at least 8 characters long.";
+    }
+
+    if (!formData.fullName.trim()) {
+      return "Please enter your full name.";
+    }
+
+    if (formData.password !== formData.confirmPassword) {
+      return "Passwords do not match.";
+    }
+
+    if (!formData.agreeTerms) {
+      return "You must accept the Terms of Service to continue.";
+    }
+  }
+
+  return null;
+}
+
 interface AuthFormProps {
   initialMode?: "signin" | "signup";
   onSuccess?: () => void;
@@ -44,7 +97,7 @@ export default function AuthForm({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const [formData, setFormData] = useState({
+  const [formData, setFormData] = useState<FormData>({
     fullName: "",
     email: "",
     password: "",
@@ -68,46 +121,19 @@ export default function AuthForm({
     e.preventDefault();
     setError(null);
 
-    // Validation
-    const email = formData.email.trim();
-
-    if (!email || !formData.password.trim()) {
-      setError("Please fill in all required fields.");
+    const error = validateForm(formData, mode);
+    if (error) {
+      setError(error);
       return;
-    }
-
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      setError("Please enter a valid email address.");
-      return;
-    }
-
-    if (mode === "signup") {
-      if (formData.password.length < 8) {
-        setError("Password must be at least 8 characters long.");
-        return;
-      }
-
-      if (!formData.fullName.trim()) {
-        setError("Please enter your full name.");
-        return;
-      }
-      if (formData.password !== formData.confirmPassword) {
-        setError("Passwords do not match.");
-        return;
-      }
-      if (!formData.agreeTerms) {
-        setError("You must accept the Terms of Service to continue.");
-        return;
-      }
     }
 
     setLoading(true);
 
     try {
       if (mode === "signin") {
-        await authApi.signIn(email, formData.password);
+        await authApi.signIn(formData.email.trim(), formData.password);
       } else {
-        await authApi.signUp(formData.fullName, email, formData.password);
+        await authApi.signUp(formData.fullName, formData.email.trim(), formData.password);
       }
 
       clearSessionCache();
@@ -295,17 +321,7 @@ export default function AuthForm({
                   ),
                 },
               }}
-              sx={{
-                "& .MuiOutlinedInput-root": {
-                  bgcolor: "#121212",
-                  color: "#ECECEC",
-                  borderRadius: 2,
-                  "& fieldset": { borderColor: "#3F3F3F" },
-                  "&:hover fieldset": { borderColor: "#555" },
-                  "&.Mui-focused fieldset": { borderColor: "#ECECEC" },
-                },
-                "& input": { py: "10px", fontSize: "0.92rem" },
-              }}
+              sx={textFieldSx}
             />
           </Box>
         )}
@@ -331,17 +347,7 @@ export default function AuthForm({
                 ),
               },
             }}
-            sx={{
-              "& .MuiOutlinedInput-root": {
-                bgcolor: "#121212",
-                color: "#ECECEC",
-                borderRadius: 2,
-                "& fieldset": { borderColor: "#3F3F3F" },
-                "&:hover fieldset": { borderColor: "#555" },
-                "&.Mui-focused fieldset": { borderColor: "#ECECEC" },
-              },
-              "& input": { py: "10px", fontSize: "0.92rem" },
-            }}
+            sx={textFieldSx}
           />
         </Box>
 
@@ -398,17 +404,7 @@ export default function AuthForm({
                 ),
               },
             }}
-            sx={{
-              "& .MuiOutlinedInput-root": {
-                bgcolor: "#121212",
-                color: "#ECECEC",
-                borderRadius: 2,
-                "& fieldset": { borderColor: "#3F3F3F" },
-                "&:hover fieldset": { borderColor: "#555" },
-                "&.Mui-focused fieldset": { borderColor: "#ECECEC" },
-              },
-              "& input": { py: "10px", fontSize: "0.92rem" },
-            }}
+            sx={textFieldSx}
           />
         </Box>
 
@@ -450,17 +446,7 @@ export default function AuthForm({
                   ),
                 },
               }}
-              sx={{
-                "& .MuiOutlinedInput-root": {
-                  bgcolor: "#121212",
-                  color: "#ECECEC",
-                  borderRadius: 2,
-                  "& fieldset": { borderColor: "#3F3F3F" },
-                  "&:hover fieldset": { borderColor: "#555" },
-                  "&.Mui-focused fieldset": { borderColor: "#ECECEC" },
-                },
-                "& input": { py: "10px", fontSize: "0.92rem" },
-              }}
+              sx={textFieldSx}
             />
           </Box>
         )}

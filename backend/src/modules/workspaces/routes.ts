@@ -35,16 +35,7 @@ router.get("/", requireAuth, async (c) => {
 
 router.get("/:id", requireAuth, async (c) => {
   const user = c.get("user");
-  const id = c.req.param("id");
-
-  if (!id) {
-    return c.json(
-      {
-        message: "Workspace id is required",
-      },
-      400
-    );
-  }
+  const id = c.req.param("id")!;
 
   const workspace = await getWorkspaceById(
     id,
@@ -70,11 +61,7 @@ router.patch(
   async (c) => {
     const user = c.get("user");
 
-    const id = c.req.param("id");
-
-    if (!id) {
-      return c.json({ message: "Workspace id is required" }, 400);
-    }
+    const id = c.req.param("id")!;
 
     const { name } = c.req.valid("json");
 
@@ -91,16 +78,7 @@ router.patch(
 router.delete("/:id", requireAuth, async (c) => {
   const user = c.get("user");
 
-  const id = c.req.param("id");
-
-  if (!id) {
-    return c.json(
-      {
-        message: "Workspace id is required",
-      },
-      400
-    );
-  }
+  const id = c.req.param("id")!;
 
   const workspace = await deleteWorkspace(id, user.id);
 

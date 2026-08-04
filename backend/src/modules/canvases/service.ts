@@ -1,22 +1,24 @@
 import { and, desc, eq } from "drizzle-orm";
 import { getWorkspaceByIdAndOwner } from "../workspaces/service.js";
+import { HttpError } from "../errors.js";
 import { db } from "../../db/index.js";
 import { canvases, workspaces } from "../../db/schema/index.js";
+
+async function assertWorkspaceOwnership(workspaceId: string, ownerId: string) {
+  const workspace = await getWorkspaceByIdAndOwner(workspaceId, ownerId);
+
+  if (!workspace) {
+    throw new HttpError(404, "Workspace not found");
+  }
+}
 
 export async function createCanvas(
   name: string,
   workspaceId: string,
   ownerId: string
 ) {
+  await assertWorkspaceOwnership(workspaceId, ownerId);
 
-  const workspace = await getWorkspaceByIdAndOwner(
-  workspaceId,
-  ownerId
-);
-  
-  if (!workspace) {
-  throw new Error("Workspace not found");
-}
   const [canvas] = await db
     .insert(canvases)
     .values({
@@ -29,14 +31,8 @@ export async function createCanvas(
 }
 
 export async function getCanvasesByWorkspace(workspaceId: string, ownerId: string) {
-  const workspace = await getWorkspaceByIdAndOwner(
-  workspaceId,
-  ownerId
-);
+  await assertWorkspaceOwnership(workspaceId, ownerId);
 
-if (!workspace) {
-  throw new Error("Workspace not found");
-}  
   return db
     .select()
     .from(canvases)
