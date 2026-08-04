@@ -2,7 +2,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "npm --prefix frontend install && npm --prefix frontend run build"
+    "build": "npm --prefix backend install && npm --prefix backend run build && npm --prefix frontend install && npm --prefix frontend run build"
   },
   "dependencies": {
     "hono": "^4.12.32"
