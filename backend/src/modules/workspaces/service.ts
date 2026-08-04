@@ -1,6 +1,7 @@
 import { db } from "../../db/index.js";
 import { workspaces } from "../../db/schema/workspaces.js";
-import { desc, eq, and } from "drizzle-orm";
+import { canvases } from "../../db/schema/index.js";
+import { count, desc, eq, and, getTableColumns } from "drizzle-orm";
 
 
 export async function createWorkspace(
@@ -20,9 +21,14 @@ export async function createWorkspace(
 
 export async function getWorkspaces(ownerId: string) {
   return db
-    .select()
+    .select({
+      ...getTableColumns(workspaces),
+      canvasesCount: count(canvases.id),
+    })
     .from(workspaces)
+    .leftJoin(canvases, eq(canvases.workspaceId, workspaces.id))
     .where(eq(workspaces.ownerId, ownerId))
+    .groupBy(workspaces.id)
     .orderBy(desc(workspaces.createdAt));
 }
 export async function getWorkspaceById(

@@ -10,6 +10,7 @@ import {
   TextField,
   CircularProgress,
   Alert,
+  Skeleton,
 } from "@mui/material";
 
 import AddRoundedIcon from "@mui/icons-material/AddRounded";
@@ -142,14 +143,22 @@ export default function WorkspaceView({
               variant="h4"
               sx={{ fontWeight: 700 }}
             >
-              {workspaceName}
+              {loading ? (
+                <Skeleton width={240} />
+              ) : (
+                workspaceName
+              )}
             </Typography>
 
             <Typography
               color="text.secondary"
               sx={{ mt: 0.8 }}
             >
-              {canvases.length} canvases
+              {loading ? (
+                <Skeleton width={90} />
+              ) : (
+                `${canvases.length} canvases`
+              )}
             </Typography>
           </Box>
 

@@ -23,13 +23,21 @@ import {
 } from "@mui/icons-material";
 
 import { useState } from "react";
+import { Link } from "@tanstack/react-router";
 
 const drawerWidth = 240;
 
-const menuItems = [
+interface MenuItem {
+  text: string;
+  icon: React.ReactNode;
+  to?: "/dashboard";
+}
+
+const menuItems: MenuItem[] = [
   {
     text: "Dashboard",
     icon: <Dashboard />,
+    to: "/dashboard",
   },
   {
     text: "Analytics",
@@ -67,7 +75,11 @@ export default function Sidebar() {
             key={item.text}
             disablePadding
           >
-            <ListItemButton>
+            <ListItemButton
+              component={item.to ? Link : "button"}
+              {...(item.to ? { to: item.to } : {})}
+              onClick={() => setMobileOpen(false)}
+            >
               <ListItemIcon>{item.icon}</ListItemIcon>
 
               <ListItemText primary={item.text} />
