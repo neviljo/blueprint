@@ -1,3 +1,10 @@
+import type {
+  AuthResult,
+  CanvasContent,
+  SignOutResult,
+  UserSession,
+} from "./types";
+
 const API_BASE_URL = "";
 
 export interface Workspace {
@@ -14,19 +21,9 @@ export interface Canvas {
   name: string;
   workspaceId: string;
   userId: string;
-  content?: any;
+  content?: string | CanvasContent | null;
   createdAt: string;
   updatedAt: string;
-}
-
-export interface UserSession {
-  user: {
-    id: string;
-    email: string;
-    name: string;
-    image?: string;
-  } | null;
-  session: any | null;
 }
 
 async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
@@ -44,7 +41,7 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
   });
 
   if (!response.ok) {
-    let errorMessage = "An error occurred";
+    let errorMessage: string;
     try {
       const errorData = await response.json();
       errorMessage = errorData.message || errorData.error || response.statusText;
@@ -68,21 +65,21 @@ export const authApi = {
     }
   },
 
-  async signIn(email: string, password: string): Promise<any> {
+  async signIn(email: string, password: string, rememberMe = false): Promise<AuthResult> {
     return request("/api/auth/sign-in/email", {
       method: "POST",
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify({ email, password, rememberMe }),
     });
   },
 
-  async signUp(name: string, email: string, password: string): Promise<any> {
+  async signUp(name: string, email: string, password: string): Promise<AuthResult> {
     return request("/api/auth/sign-up/email", {
       method: "POST",
       body: JSON.stringify({ name, email, password }),
     });
   },
 
-  async signOut(): Promise<any> {
+  async signOut(): Promise<SignOutResult> {
     return request("/api/auth/sign-out", {
       method: "POST",
       body: JSON.stringify({}),
@@ -145,7 +142,7 @@ export const canvasApi = {
     });
   },
 
-  async updateContent(id: string, content: any): Promise<Canvas> {
+  async updateContent(id: string, content: CanvasContent | string): Promise<Canvas> {
     return request<Canvas>(`/api/canvases/${id}/content`, {
       method: "PATCH",
       body: JSON.stringify({ content }),

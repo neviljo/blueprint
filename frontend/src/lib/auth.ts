@@ -1,5 +1,6 @@
 import { redirect } from "@tanstack/react-router";
-import { authApi, type UserSession } from "./api";
+import { authApi } from "./api";
+import type { UserSession } from "./types";
 
 let cachedSession: UserSession | null | undefined;
 

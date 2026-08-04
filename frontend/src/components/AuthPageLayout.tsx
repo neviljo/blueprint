@@ -1,25 +1,13 @@
-import { useEffect } from "react";
-import { createFileRoute, Link as RouterLink, useNavigate } from "@tanstack/react-router";
+import type { ReactNode } from "react";
 import { Box, Button } from "@mui/material";
 import ArrowBackRoundedIcon from "@mui/icons-material/ArrowBackRounded";
-import AuthForm from "../components/AuthForm";
-import { getCurrentSession } from "../lib/auth";
+import { Link as RouterLink } from "@tanstack/react-router";
 
-export const Route = createFileRoute("/login")({
-  component: LoginPage,
-});
+interface AuthPageLayoutProps {
+  children: ReactNode;
+}
 
-function LoginPage() {
-  const navigate = useNavigate();
-
-  useEffect(() => {
-    getCurrentSession().then((session) => {
-      if (session?.user) {
-        navigate({ to: "/dashboard" });
-      }
-    });
-  }, [navigate]);
-
+export default function AuthPageLayout({ children }: AuthPageLayoutProps) {
   return (
     <Box
       sx={{
@@ -41,7 +29,8 @@ function LoginPage() {
           transform: "translateX(-50%)",
           width: "600px",
           height: "600px",
-          background: "radial-gradient(circle, rgba(192, 132, 252, 0.12) 0%, rgba(0, 0, 0, 0) 70%)",
+          background:
+            "radial-gradient(circle, rgba(192, 132, 252, 0.12) 0%, rgba(0, 0, 0, 0) 70%)",
           pointerEvents: "none",
         },
       }}
@@ -65,7 +54,7 @@ function LoginPage() {
         Back to Home
       </Button>
 
-      <AuthForm initialMode="signin" />
+      {children}
     </Box>
   );
 }

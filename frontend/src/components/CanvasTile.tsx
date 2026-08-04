@@ -1,24 +1,12 @@
-import { useState } from "react";
 import {
   Card,
   CardActionArea,
   Box,
   Typography,
   Chip,
-  IconButton,
-  Menu,
-  MenuItem,
-  ListItemIcon,
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogContentText,
-  DialogActions,
-  Button,
 } from "@mui/material";
-import MoreVertIcon from "@mui/icons-material/MoreVert";
-import DeleteOutlineIcon from "@mui/icons-material/DeleteOutlineRounded";
 import { Link } from "@tanstack/react-router";
+import TileActions from "./TileActions";
 
 interface Props {
   id: string;
@@ -33,35 +21,6 @@ export default function CanvasTile({
   objects,
   onDelete,
 }: Props) {
-  const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
-  const [confirmOpen, setConfirmOpen] = useState(false);
-
-  const handleMenuOpen = (e: React.MouseEvent<HTMLElement>) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setAnchorEl(e.currentTarget);
-  };
-
-  const handleMenuClose = () => {
-    setAnchorEl(null);
-  };
-
-  const handleOpenConfirm = (e: React.MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    handleMenuClose();
-    setConfirmOpen(true);
-  };
-
-  const handleConfirmDelete = (e: React.MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setConfirmOpen(false);
-    if (onDelete) {
-      onDelete(id);
-    }
-  };
-
   return (
     <>
       <Box sx={{ position: "relative", width: 300 }}>
@@ -181,10 +140,11 @@ export default function CanvasTile({
             </CardActionArea>
 
             {/* Delete Menu Trigger Button */}
-            <IconButton
-              size="small"
-              onClick={handleMenuOpen}
-              sx={{
+            <TileActions
+              name={name}
+              resourceType="canvas"
+              onDelete={() => onDelete?.(id)}
+              iconSx={{
                 position: "absolute",
                 top: 8,
                 right: 8,
@@ -193,78 +153,10 @@ export default function CanvasTile({
                 bgcolor: "rgba(0,0,0,0.5)",
                 "&:hover": { color: "#ECECEC", bgcolor: "rgba(0,0,0,0.8)" },
               }}
-            >
-              <MoreVertIcon fontSize="small" />
-            </IconButton>
+            />
           </Card>
         </Link>
       </Box>
-
-      {/* Canvas Context Menu */}
-      <Menu
-        anchorEl={anchorEl}
-        open={Boolean(anchorEl)}
-        onClose={handleMenuClose}
-        slotProps={{
-          paper: {
-            sx: {
-              bgcolor: "#1A1A1A",
-              border: "1px solid #2F2F2F",
-              color: "#ECECEC",
-              minWidth: 150,
-            },
-          },
-        }}
-      >
-        <MenuItem onClick={handleOpenConfirm} sx={{ color: "#EF4444" }}>
-          <ListItemIcon>
-            <DeleteOutlineIcon fontSize="small" sx={{ color: "#EF4444" }} />
-          </ListItemIcon>
-          Delete
-        </MenuItem>
-      </Menu>
-
-      {/* Confirmation Dialog */}
-      <Dialog
-        open={confirmOpen}
-        onClose={() => setConfirmOpen(false)}
-        onClick={(e) => e.stopPropagation()}
-        maxWidth="xs"
-        fullWidth
-        slotProps={{
-          paper: {
-            sx: {
-              bgcolor: "#1A1A1A",
-              border: "1px solid #2F2F2F",
-              color: "#ECECEC",
-            },
-          },
-        }}
-      >
-        <DialogTitle>Delete Canvas</DialogTitle>
-        <DialogContent>
-          <DialogContentText sx={{ color: "#A6A6A6" }}>
-            Are you sure you want to delete canvas <strong>"{name}"</strong>? This action cannot be undone.
-          </DialogContentText>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setConfirmOpen(false)} sx={{ color: "#A6A6A6" }}>
-            Cancel
-          </Button>
-          <Button
-            onClick={handleConfirmDelete}
-            variant="contained"
-            sx={{
-              bgcolor: "#EF4444",
-              color: "#FFF",
-              fontWeight: 700,
-              "&:hover": { bgcolor: "#DC2626" },
-            }}
-          >
-            Delete
-          </Button>
-        </DialogActions>
-      </Dialog>
     </>
   );
 }

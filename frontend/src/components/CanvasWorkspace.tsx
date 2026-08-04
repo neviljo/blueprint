@@ -4,9 +4,11 @@ import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import LightModeIcon from "@mui/icons-material/LightMode";
 import DarkModeIcon from "@mui/icons-material/DarkMode";
 import { Excalidraw } from "@excalidraw/excalidraw";
-import type { ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
+import type { AppState, ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
+import type { ExcalidrawElement } from "@excalidraw/excalidraw/element/types";
 import { useNavigate } from "@tanstack/react-router";
 import { canvasApi } from "../lib/api";
+import type { CanvasContent } from "../lib/types";
 
 interface CanvasWorkspaceProps {
   canvasId: string;
@@ -14,15 +16,15 @@ interface CanvasWorkspaceProps {
 
 export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
   const [loading, setLoading] = useState(true);
-  const [initialData, setInitialData] = useState<any>(null);
+  const [initialData, setInitialData] = useState<CanvasContent | null>(null);
   const [workspaceId, setWorkspaceId] = useState<string | null>(null);
   const [editorTheme, setEditorTheme] = useState<"dark" | "light">("dark");
   const isLight = editorTheme === "light";
 
   const navigate = useNavigate();
-  const saveTimeoutRef = useRef<any>(null);
+  const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const excalidrawRef = useRef<ExcalidrawImperativeAPI>(null);
-  const currentContentRef = useRef<{ elements: any[]; appState: any }>({
+  const currentContentRef = useRef<CanvasContent>({
     elements: [],
     appState: { theme: "dark" },
   });
@@ -36,10 +38,10 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         if (data) {
           if (data.workspaceId) setWorkspaceId(data.workspaceId);
 
-          let parsedContent: any = null;
+          let parsedContent: CanvasContent | null = null;
           if (data.content && typeof data.content === "string") {
             try {
-              parsedContent = JSON.parse(data.content);
+              parsedContent = JSON.parse(data.content) as CanvasContent;
             } catch {
               parsedContent = null;
             }
@@ -49,8 +51,8 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
 
           if (parsedContent) {
             const loadedAppState = { ...(parsedContent.appState || {}) };
-            delete loadedAppState.collaborators;
-            const savedTheme = parsedContent.appState?.theme === "light" ? "light" : "dark";
+            const savedTheme =
+              loadedAppState.theme === "light" ? "light" : "dark";
             const initialAppState = {
               ...loadedAppState,
               viewModeEnabled: false,
@@ -92,15 +94,18 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
 
   // Save content to backend API
   const saveCanvasContent = useCallback(
-    async (elements: any[], appState: any) => {
+    async (elements: ExcalidrawElement[], appState: Partial<AppState>) => {
       try {
-        const cleanAppState = { ...(appState || {}) };
+        const cleanAppState: Partial<AppState> = { ...appState };
         delete cleanAppState.collaborators;
 
-        await canvasApi.updateContent(canvasId, JSON.stringify({
-          elements,
-          appState: cleanAppState,
-        }));
+        await canvasApi.updateContent(
+          canvasId,
+          JSON.stringify({
+            elements,
+            appState: cleanAppState,
+          })
+        );
       } catch (err) {
         console.warn("Failed to save canvas content to backend:", err);
       }
@@ -109,13 +114,16 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
   );
 
   // Handle canvas drawing changes with debounced auto-save
-  const handleChange = (elements: readonly any[], appState: any) => {
+  const handleChange = (
+    elements: readonly ExcalidrawElement[],
+    appState: AppState
+  ) => {
     currentContentRef.current = {
       elements: [...elements],
       appState,
     };
 
-    setEditorTheme(appState?.theme === "light" ? "light" : "dark");
+    setEditorTheme(appState.theme === "light" ? "light" : "dark");
 
     if (saveTimeoutRef.current) {
       clearTimeout(saveTimeoutRef.current);
@@ -143,7 +151,6 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
     });
     saveCanvasContent(currentContentRef.current.elements, updatedAppState);
   }, [editorTheme, saveCanvasContent]);
-
   return (
     <Box
       sx={{

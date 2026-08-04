@@ -15,6 +15,7 @@ import {
 import AddRoundedIcon from "@mui/icons-material/AddRounded";
 import CanvasTile from "./CanvasTile";
 import { canvasApi, workspaceApi } from "../lib/api";
+import type { Canvas } from "../lib/api";
 
 interface CanvasItem {
   id: string;
@@ -26,19 +27,16 @@ interface Props {
   workspaceId: string;
 }
 
-function countObjects(content: any): number {
+function countObjects(content: Canvas["content"]): number {
   if (!content) return 0;
   if (typeof content === "string") {
     try {
-      const parsed = JSON.parse(content);
-      return countObjects(parsed);
+      return countObjects(JSON.parse(content));
     } catch {
       return 0;
     }
   }
-  if (Array.isArray(content)) return content.length;
-  if (Array.isArray(content?.elements)) return content.elements.length;
-  return 0;
+  return content.elements?.length ?? 0;
 }
 
 export default function WorkspaceView({

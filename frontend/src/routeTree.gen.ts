@@ -11,7 +11,6 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as DashboardRouteRouteImport } from './routes/dashboard/route'
-import { Route as LoginRouteImport } from './routes/login'
 import { Route as SigninRouteImport } from './routes/signin'
 import { Route as SignupRouteImport } from './routes/signup'
 import { Route as CanvasCanvasIdRouteImport } from './routes/canvas/$canvasId'
@@ -26,11 +25,6 @@ const IndexRoute = IndexRouteImport.update({
 const DashboardRouteRoute = DashboardRouteRouteImport.update({
   id: '/dashboard',
   path: '/dashboard',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const LoginRoute = LoginRouteImport.update({
-  id: '/login',
-  path: '/login',
   getParentRoute: () => rootRouteImport,
 } as any)
 const SigninRoute = SigninRouteImport.update({
@@ -63,7 +57,6 @@ const DashboardWorkspacesWorkspaceIdRoute =
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/dashboard': typeof DashboardRouteRouteWithChildren
-  '/login': typeof LoginRoute
   '/signin': typeof SigninRoute
   '/signup': typeof SignupRoute
   '/canvas/$canvasId': typeof CanvasCanvasIdRoute
@@ -72,7 +65,6 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
-  '/login': typeof LoginRoute
   '/signin': typeof SigninRoute
   '/signup': typeof SignupRoute
   '/canvas/$canvasId': typeof CanvasCanvasIdRoute
@@ -83,7 +75,6 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/dashboard': typeof DashboardRouteRouteWithChildren
-  '/login': typeof LoginRoute
   '/signin': typeof SigninRoute
   '/signup': typeof SignupRoute
   '/canvas/$canvasId': typeof CanvasCanvasIdRoute
@@ -95,7 +86,6 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/dashboard'
-    | '/login'
     | '/signin'
     | '/signup'
     | '/canvas/$canvasId'
@@ -104,7 +94,6 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
-    | '/login'
     | '/signin'
     | '/signup'
     | '/canvas/$canvasId'
@@ -114,7 +103,6 @@ export interface FileRouteTypes {
     | '__root__'
     | '/'
     | '/dashboard'
-    | '/login'
     | '/signin'
     | '/signup'
     | '/canvas/$canvasId'
@@ -125,7 +113,6 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   DashboardRouteRoute: typeof DashboardRouteRouteWithChildren
-  LoginRoute: typeof LoginRoute
   SigninRoute: typeof SigninRoute
   SignupRoute: typeof SignupRoute
   CanvasCanvasIdRoute: typeof CanvasCanvasIdRoute
@@ -145,13 +132,6 @@ declare module '@tanstack/react-router' {
       path: '/dashboard'
       fullPath: '/dashboard'
       preLoaderRoute: typeof DashboardRouteRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/login': {
-      id: '/login'
-      path: '/login'
-      fullPath: '/login'
-      preLoaderRoute: typeof LoginRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/signin': {
@@ -209,7 +189,6 @@ const DashboardRouteRouteWithChildren = DashboardRouteRoute._addFileChildren(
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   DashboardRouteRoute: DashboardRouteRouteWithChildren,
-  LoginRoute: LoginRoute,
   SigninRoute: SigninRoute,
   SignupRoute: SignupRoute,
   CanvasCanvasIdRoute: CanvasCanvasIdRoute,

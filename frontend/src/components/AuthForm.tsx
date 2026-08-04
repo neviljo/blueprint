@@ -14,6 +14,7 @@ import {
   Alert,
   CircularProgress,
   Paper,
+  Tooltip,
 } from "@mui/material";
 import {
   EmailOutlined,
@@ -131,7 +132,7 @@ export default function AuthForm({
 
     try {
       if (mode === "signin") {
-        await authApi.signIn(formData.email.trim(), formData.password);
+        await authApi.signIn(formData.email.trim(), formData.password, formData.rememberMe);
       } else {
         await authApi.signUp(formData.fullName, formData.email.trim(), formData.password);
       }
@@ -146,9 +147,30 @@ export default function AuthForm({
     }
   };
 
-  const handleSocialAuth = () => {
-    setError("Social sign-in is not configured yet. Please use email to sign in.");
-  };
+  const renderSocialButton = (label: string, icon: React.ReactNode) => (
+    <Tooltip title={`${label} coming soon`} placement="top">
+      <span>
+        <Button
+          fullWidth
+          variant="outlined"
+          startIcon={icon}
+          disabled
+          sx={{
+            py: 0.9,
+            color: "#ECECEC",
+            borderColor: "#3F3F3F",
+            bgcolor: "#212121",
+            textTransform: "none",
+            fontWeight: 500,
+            fontSize: "0.9rem",
+            borderRadius: 2,
+          }}
+        >
+          Continue with {label}
+        </Button>
+      </span>
+    </Tooltip>
+  );
 
   return (
     <Paper
@@ -219,53 +241,15 @@ export default function AuthForm({
 
       {/* Social Logins */}
       <Box sx={{ display: "flex", flexDirection: "column", gap: 1.2, mb: 2 }}>
-        <Button
-          fullWidth
-          variant="outlined"
-          startIcon={<GoogleIcon sx={{ fontSize: "1.1rem !important", color: "#4285F4" }} />}
-          onClick={handleSocialAuth}
-          disabled={loading}
-          sx={{
-            py: 0.9,
-            color: "#ECECEC",
-            borderColor: "#3F3F3F",
-            bgcolor: "#212121",
-            textTransform: "none",
-            fontWeight: 500,
-            fontSize: "0.9rem",
-            borderRadius: 2,
-            "&:hover": {
-              bgcolor: "#2A2A2A",
-              borderColor: "#555555",
-            },
-          }}
-        >
-          Continue with Google
-        </Button>
+        {renderSocialButton(
+          "Google",
+          <GoogleIcon sx={{ fontSize: "1.1rem !important", color: "#4285F4" }} />
+        )}
 
-        <Button
-          fullWidth
-          variant="outlined"
-          startIcon={<GitHubIcon sx={{ fontSize: "1.1rem !important" }} />}
-          onClick={handleSocialAuth}
-          disabled={loading}
-          sx={{
-            py: 0.9,
-            color: "#ECECEC",
-            borderColor: "#3F3F3F",
-            bgcolor: "#212121",
-            textTransform: "none",
-            fontWeight: 500,
-            fontSize: "0.9rem",
-            borderRadius: 2,
-            "&:hover": {
-              bgcolor: "#2A2A2A",
-              borderColor: "#555555",
-            },
-          }}
-        >
-          Continue with GitHub
-        </Button>
+        {renderSocialButton(
+          "GitHub",
+          <GitHubIcon sx={{ fontSize: "1.1rem !important" }} />
+        )}
       </Box>
 
       <Divider
@@ -357,21 +341,27 @@ export default function AuthForm({
               PASSWORD
             </Typography>
             {mode === "signin" && (
-              <Link
-                component="button"
-                type="button"
-                variant="caption"
-                onClick={() => alert("Password reset link has been sent to your email.")}
-                sx={{
-                  color: "#c084fc",
-                  textDecoration: "none",
-                  fontWeight: 500,
-                  fontSize: "0.78rem",
-                  "&:hover": { textDecoration: "underline" },
-                }}
-              >
-                Forgot password?
-              </Link>
+              <Tooltip title="Password reset coming soon" placement="top">
+                <span>
+                  <Link
+                    component="button"
+                    type="button"
+                    onClick={() => {}}
+                    disabled
+                    aria-disabled="true"
+                    sx={{
+                      color: "#c084fc",
+                      textDecoration: "none",
+                      fontWeight: 500,
+                      fontSize: "0.78rem",
+                      cursor: "not-allowed",
+                      opacity: 0.6,
+                    }}
+                  >
+                    Forgot password?
+                  </Link>
+                </span>
+              </Tooltip>
             )}
           </Box>
           <TextField
