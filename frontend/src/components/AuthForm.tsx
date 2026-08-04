@@ -3,7 +3,6 @@ import type { SubmitEvent } from "react";
 import {
   Box,
   Typography,
-  TextField,
   Button,
   InputAdornment,
   IconButton,
@@ -22,69 +21,17 @@ import {
   PersonOutlined,
   Visibility,
   VisibilityOff,
-  Google as GoogleIcon,
-  GitHub as GitHubIcon,
   ArrowForwardRounded,
 } from "@mui/icons-material";
 import { useNavigate } from "@tanstack/react-router";
 import { authApi } from "../lib/api";
 import { clearSessionCache } from "../lib/auth";
-
-const textFieldSx = {
-  "& .MuiOutlinedInput-root": {
-    bgcolor: "#121212",
-    color: "#ECECEC",
-    borderRadius: 2,
-    "& fieldset": { borderColor: "#3F3F3F" },
-    "&:hover fieldset": { borderColor: "#555" },
-    "&.Mui-focused fieldset": { borderColor: "#ECECEC" },
-  },
-  "& input": { py: "10px", fontSize: "0.92rem" },
-};
-
-interface FormData {
-  fullName: string;
-  email: string;
-  password: string;
-  confirmPassword: string;
-  rememberMe: boolean;
-  agreeTerms: boolean;
-}
-
-function validateForm(formData: FormData, mode: "signin" | "signup"): string | null {
-  const email = formData.email.trim();
-
-  if (!email || !formData.password.trim()) {
-    return "Please fill in all required fields.";
-  }
-
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    return "Please enter a valid email address.";
-  }
-
-  if (mode === "signup") {
-    if (formData.password.length < 8) {
-      return "Password must be at least 8 characters long.";
-    }
-
-    if (!formData.fullName.trim()) {
-      return "Please enter your full name.";
-    }
-
-    if (formData.password !== formData.confirmPassword) {
-      return "Passwords do not match.";
-    }
-
-    if (!formData.agreeTerms) {
-      return "You must accept the Terms of Service to continue.";
-    }
-  }
-
-  return null;
-}
+import { validateForm, type AuthFormData, type AuthMode } from "../lib/authValidation";
+import AuthTextField from "./AuthTextField";
+import SocialLoginButtons from "./SocialLoginButtons";
 
 interface AuthFormProps {
-  initialMode?: "signin" | "signup";
+  initialMode?: AuthMode;
   onSuccess?: () => void;
 }
 
@@ -92,13 +39,13 @@ export default function AuthForm({
   initialMode = "signin",
   onSuccess,
 }: AuthFormProps) {
-  const [mode, setMode] = useState<"signin" | "signup">(initialMode);
+  const [mode, setMode] = useState<AuthMode>(initialMode);
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const [formData, setFormData] = useState<FormData>({
+  const [formData, setFormData] = useState<AuthFormData>({
     fullName: "",
     email: "",
     password: "",
@@ -147,29 +94,20 @@ export default function AuthForm({
     }
   };
 
-  const renderSocialButton = (label: string, icon: React.ReactNode) => (
-    <Tooltip title={`${label} coming soon`} placement="top">
-      <span>
-        <Button
-          fullWidth
-          variant="outlined"
-          startIcon={icon}
-          disabled
-          sx={{
-            py: 0.9,
-            color: "#ECECEC",
-            borderColor: "#3F3F3F",
-            bgcolor: "#212121",
-            textTransform: "none",
-            fontWeight: 500,
-            fontSize: "0.9rem",
-            borderRadius: 2,
-          }}
-        >
-          Continue with {label}
-        </Button>
-      </span>
-    </Tooltip>
+  const passwordToggle = (
+    shown: boolean,
+    toggle: () => void
+  ) => (
+    <InputAdornment position="end">
+      <IconButton
+        onClick={toggle}
+        edge="end"
+        size="small"
+        sx={{ color: "#777777" }}
+      >
+        {shown ? <VisibilityOff sx={{ fontSize: 18 }} /> : <Visibility sx={{ fontSize: 18 }} />}
+      </IconButton>
+    </InputAdornment>
   );
 
   return (
@@ -240,17 +178,7 @@ export default function AuthForm({
       </Box>
 
       {/* Social Logins */}
-      <Box sx={{ display: "flex", flexDirection: "column", gap: 1.2, mb: 2 }}>
-        {renderSocialButton(
-          "Google",
-          <GoogleIcon sx={{ fontSize: "1.1rem !important", color: "#4285F4" }} />
-        )}
-
-        {renderSocialButton(
-          "GitHub",
-          <GitHubIcon sx={{ fontSize: "1.1rem !important" }} />
-        )}
-      </Box>
+      <SocialLoginButtons />
 
       <Divider
         sx={{
@@ -285,160 +213,77 @@ export default function AuthForm({
       {/* Form Inputs */}
       <Box component="form" onSubmit={handleSubmit} noValidate>
         {mode === "signup" && (
-          <Box sx={{ mb: 1.8 }}>
-            <Typography variant="caption" sx={{ color: "#A6A6A6", fontWeight: 600, mb: 0.5, display: "block" }}>
-              FULL NAME
-            </Typography>
-            <TextField
-              fullWidth
-              name="fullName"
-              placeholder="John Doe"
-              value={formData.fullName}
-              onChange={handleInputChange}
-              size="small"
-              slotProps={{
-                input: {
-                  startAdornment: (
-                    <InputAdornment position="start">
-                      <PersonOutlined sx={{ color: "#777777", fontSize: 18 }} />
-                    </InputAdornment>
-                  ),
-                },
-              }}
-              sx={textFieldSx}
-            />
-          </Box>
+          <AuthTextField
+            label="FULL NAME"
+            name="fullName"
+            placeholder="John Doe"
+            value={formData.fullName}
+            onChange={handleInputChange}
+            startIcon={<PersonOutlined sx={{ color: "#777777", fontSize: 18 }} />}
+          />
         )}
 
-        <Box sx={{ mb: 1.8 }}>
-          <Typography variant="caption" sx={{ color: "#A6A6A6", fontWeight: 600, mb: 0.5, display: "block" }}>
-            EMAIL ADDRESS
-          </Typography>
-          <TextField
-            fullWidth
-            type="email"
-            name="email"
-            placeholder="name@example.com"
-            value={formData.email}
-            onChange={handleInputChange}
-            size="small"
-            slotProps={{
-              input: {
-                startAdornment: (
-                  <InputAdornment position="start">
-                    <EmailOutlined sx={{ color: "#777777", fontSize: 18 }} />
-                  </InputAdornment>
-                ),
-              },
-            }}
-            sx={textFieldSx}
-          />
-        </Box>
+        <AuthTextField
+          label="EMAIL ADDRESS"
+          name="email"
+          type="email"
+          placeholder="name@example.com"
+          value={formData.email}
+          onChange={handleInputChange}
+          startIcon={<EmailOutlined sx={{ color: "#777777", fontSize: 18 }} />}
+        />
 
-        <Box sx={{ mb: mode === "signup" ? 1.8 : 1 }}>
-          <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 0.5 }}>
-            <Typography variant="caption" sx={{ color: "#A6A6A6", fontWeight: 600 }}>
-              PASSWORD
-            </Typography>
-            {mode === "signin" && (
-              <Tooltip title="Password reset coming soon" placement="top">
-                <span>
-                  <Link
-                    component="button"
-                    type="button"
-                    onClick={() => {}}
-                    disabled
-                    aria-disabled="true"
-                    sx={{
-                      color: "#c084fc",
-                      textDecoration: "none",
-                      fontWeight: 500,
-                      fontSize: "0.78rem",
-                      cursor: "not-allowed",
-                      opacity: 0.6,
-                    }}
-                  >
-                    Forgot password?
-                  </Link>
-                </span>
-              </Tooltip>
-            )}
-          </Box>
-          <TextField
-            fullWidth
-            type={showPassword ? "text" : "password"}
-            name="password"
-            placeholder="••••••••"
-            value={formData.password}
-            onChange={handleInputChange}
-            size="small"
-            helperText={mode === "signup" ? "At least 8 characters" : undefined}
-            slotProps={{
-              input: {
-                startAdornment: (
-                  <InputAdornment position="start">
-                    <LockOutlined sx={{ color: "#777777", fontSize: 18 }} />
-                  </InputAdornment>
-                ),
-                endAdornment: (
-                  <InputAdornment position="end">
-                    <IconButton
-                      onClick={() => setShowPassword(!showPassword)}
-                      edge="end"
-                      size="small"
-                      sx={{ color: "#777777" }}
+        <AuthTextField
+          label={
+            <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span>PASSWORD</span>
+              {mode === "signin" && (
+                <Tooltip title="Password reset coming soon" placement="top">
+                  <span>
+                    <Link
+                      component="button"
+                      type="button"
+                      onClick={() => {}}
+                      disabled
+                      aria-disabled="true"
+                      sx={{
+                        color: "#c084fc",
+                        textDecoration: "none",
+                        fontWeight: 500,
+                        fontSize: "0.78rem",
+                        cursor: "not-allowed",
+                        opacity: 0.6,
+                      }}
                     >
-                      {showPassword ? <VisibilityOff sx={{ fontSize: 18 }} /> : <Visibility sx={{ fontSize: 18 }} />}
-                    </IconButton>
-                  </InputAdornment>
-                ),
-              },
-            }}
-            sx={textFieldSx}
-          />
-        </Box>
+                      Forgot password?
+                    </Link>
+                  </span>
+                </Tooltip>
+              )}
+            </Box>
+          }
+          name="password"
+          type={showPassword ? "text" : "password"}
+          placeholder="••••••••"
+          value={formData.password}
+          onChange={handleInputChange}
+          helperText={mode === "signup" ? "At least 8 characters" : undefined}
+          mb={mode === "signup" ? 1.8 : 1}
+          startIcon={<LockOutlined sx={{ color: "#777777", fontSize: 18 }} />}
+          endAdornment={passwordToggle(showPassword, () => setShowPassword(!showPassword))}
+        />
 
         {mode === "signup" && (
-          <Box sx={{ mb: 1.8 }}>
-            <Typography variant="caption" sx={{ color: "#A6A6A6", fontWeight: 600, mb: 0.5, display: "block" }}>
-              CONFIRM PASSWORD
-            </Typography>
-            <TextField
-              fullWidth
-              type={showConfirmPassword ? "text" : "password"}
-              name="confirmPassword"
-              placeholder="••••••••"
-              value={formData.confirmPassword}
-              onChange={handleInputChange}
-              size="small"
-              slotProps={{
-                input: {
-                  startAdornment: (
-                    <InputAdornment position="start">
-                      <LockOutlined sx={{ color: "#777777", fontSize: 18 }} />
-                    </InputAdornment>
-                  ),
-                  endAdornment: (
-                    <InputAdornment position="end">
-                      <IconButton
-                        onClick={() => setShowConfirmPassword(!showConfirmPassword)}
-                        edge="end"
-                        size="small"
-                        sx={{ color: "#777777" }}
-                      >
-                        {showConfirmPassword ? (
-                          <VisibilityOff sx={{ fontSize: 18 }} />
-                        ) : (
-                          <Visibility sx={{ fontSize: 18 }} />
-                        )}
-                      </IconButton>
-                    </InputAdornment>
-                  ),
-                },
-              }}
-              sx={textFieldSx}
-            />
-          </Box>
+          <AuthTextField
+            label="CONFIRM PASSWORD"
+            name="confirmPassword"
+            type={showConfirmPassword ? "text" : "password"}
+            placeholder="••••••••"
+            value={formData.confirmPassword}
+            onChange={handleInputChange}
+            startIcon={<LockOutlined sx={{ color: "#777777", fontSize: 18 }} />}
+            endAdornment={passwordToggle(showConfirmPassword, () => setShowConfirmPassword(!showConfirmPassword))}
+          />
         )}
 
         {mode === "signin" ? (
