@@ -32,7 +32,7 @@ blueprint/
 └── package.json  # Root orchestration (npm run build builds backend + frontend)
 ```
 
-See [backend/README.md](backend/README.md) and [frontend/README.md](frontend/README.md) for detailed docs on each half.
+See [backend/README.md](backend/README.md) and [frontend/README.md](frontend/README.md) for detailed docs on each half. For deeper architecture docs, see [docs/HLD.md](docs/HLD.md) (high-level design) and [docs/LLD.md](docs/LLD.md) (low-level design).
 
 ## Tech stack
 
