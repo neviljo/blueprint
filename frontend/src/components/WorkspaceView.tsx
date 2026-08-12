@@ -14,7 +14,9 @@ import {
 } from "@mui/material";
 
 import AddRoundedIcon from "@mui/icons-material/AddRounded";
+import PeopleOutlineRoundedIcon from "@mui/icons-material/PeopleOutlineRounded";
 import CanvasTile from "./CanvasTile";
+import WorkspaceMembersDialog from "./WorkspaceMembersDialog";
 import { canvasApi, workspaceApi } from "../lib/api";
 import type { Canvas } from "../lib/api";
 
@@ -44,6 +46,8 @@ export default function WorkspaceView({
   workspaceId,
 }: Props) {
   const [workspaceName, setWorkspaceName] = useState("");
+  const [isOwner, setIsOwner] = useState(false);
+  const [membersOpen, setMembersOpen] = useState(false);
   const [canvases, setCanvases] = useState<CanvasItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [open, setOpen] = useState(false);
@@ -53,7 +57,10 @@ export default function WorkspaceView({
   useEffect(() => {
     workspaceApi
       .getById(workspaceId)
-      .then((w) => setWorkspaceName(w.name))
+      .then((w) => {
+        setWorkspaceName(w.name);
+        setIsOwner(w.isOwner ?? false);
+      })
       .catch(() => {});
   }, [workspaceId]);
 
@@ -162,26 +169,51 @@ export default function WorkspaceView({
             </Typography>
           </Box>
 
-          <Button
-            startIcon={<AddRoundedIcon />}
-            onClick={() => setOpen(true)}
-            sx={{
-              bgcolor: "#000",
-              color: "#ECECEC",
-              border: "1px solid #1f1f1f",
-              borderRadius: 2,
-              px: 2.5,
-              py: 1,
-              textTransform: "none",
+          <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
+            {isOwner && (
+              <Button
+                startIcon={<PeopleOutlineRoundedIcon />}
+                onClick={() => setMembersOpen(true)}
+                sx={{
+                  bgcolor: "#000",
+                  color: "#ECECEC",
+                  border: "1px solid #1f1f1f",
+                  borderRadius: 2,
+                  px: 2.5,
+                  py: 1,
+                  textTransform: "none",
 
-              "&:hover": {
-                bgcolor: "#0a0a0a",
-                borderColor: "#3c3c3c",
-              },
-            }}
-          >
-            New Canvas
-          </Button>
+                  "&:hover": {
+                    bgcolor: "#0a0a0a",
+                    borderColor: "#3c3c3c",
+                  },
+                }}
+              >
+                Members
+              </Button>
+            )}
+
+            <Button
+              startIcon={<AddRoundedIcon />}
+              onClick={() => setOpen(true)}
+              sx={{
+                bgcolor: "#000",
+                color: "#ECECEC",
+                border: "1px solid #1f1f1f",
+                borderRadius: 2,
+                px: 2.5,
+                py: 1,
+                textTransform: "none",
+
+                "&:hover": {
+                  bgcolor: "#0a0a0a",
+                  borderColor: "#3c3c3c",
+                },
+              }}
+            >
+              New Canvas
+            </Button>
+          </Box>
         </Box>
 
         {/* Loading */}
@@ -267,6 +299,12 @@ export default function WorkspaceView({
           </Button>
         </DialogActions>
       </Dialog>
+
+      <WorkspaceMembersDialog
+        open={membersOpen}
+        workspaceId={workspaceId}
+        onClose={() => setMembersOpen(false)}
+      />
     </>
   );
 }

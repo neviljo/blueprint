@@ -13,12 +13,14 @@ import {
 } from "@mui/material";
 import AddRoundedIcon from "@mui/icons-material/AddRounded";
 import WorkspaceTile from "./WorkspaceTile";
+import WorkspaceMembersDialog from "./WorkspaceMembersDialog";
 import { workspaceApi } from "../lib/api";
 
 interface WorkspaceItem {
   id: string;
   name: string;
   canvases: number;
+  isOwner: boolean;
 }
 
 export default function WorkspaceDashboard() {
@@ -27,6 +29,7 @@ export default function WorkspaceDashboard() {
   const [open, setOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [workspaceName, setWorkspaceName] = useState("");
+  const [membersWorkspaceId, setMembersWorkspaceId] = useState<string | null>(null);
 
   // Fetch workspaces from backend API on mount
   useEffect(() => {
@@ -40,6 +43,7 @@ export default function WorkspaceDashboard() {
               id: w.id,
               name: w.name,
               canvases: w.canvasesCount || 0,
+              isOwner: w.isOwner ?? true,
             }))
           );
         }
@@ -67,6 +71,7 @@ export default function WorkspaceDashboard() {
           id: newWs.id,
           name: newWs.name || name,
           canvases: 0,
+          isOwner: true,
         },
       ]);
       setError(null);
@@ -85,6 +90,10 @@ export default function WorkspaceDashboard() {
       console.warn("Backend API workspace deletion failed, removing locally:", err);
     }
     setWorkspaces((prev) => prev.filter((w) => w.id !== id));
+  };
+
+  const handleOpenMembers = (id: string) => {
+    setMembersWorkspaceId(id);
   };
 
   return (
@@ -173,7 +182,9 @@ export default function WorkspaceDashboard() {
               id={workspace.id}
               name={workspace.name}
               canvases={workspace.canvases}
+              isOwner={workspace.isOwner}
               onDelete={handleDeleteWorkspace}
+              onMembers={handleOpenMembers}
             />
           ))}
         </Box>
@@ -233,6 +244,12 @@ export default function WorkspaceDashboard() {
           </Button>
         </DialogActions>
       </Dialog>
+
+      <WorkspaceMembersDialog
+        open={Boolean(membersWorkspaceId)}
+        workspaceId={membersWorkspaceId ?? ""}
+        onClose={() => setMembersWorkspaceId(null)}
+      />
     </>
   );
 }

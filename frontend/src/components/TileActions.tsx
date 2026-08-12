@@ -13,11 +13,14 @@ import {
 } from "@mui/material";
 import type { SxProps, Theme } from "@mui/material";
 import MoreVertIcon from "@mui/icons-material/MoreVert";
+import PeopleOutlineRoundedIcon from "@mui/icons-material/PeopleOutlineRounded";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutlineRounded";
 
 interface TileActionsProps {
   name: string;
   onDelete: () => void;
+  onMembers?: () => void;
+  canDelete?: boolean;
   resourceType: "workspace" | "canvas";
   iconSx?: SxProps<Theme>;
 }
@@ -38,6 +41,8 @@ const dialogPaperSx = {
 export default function TileActions({
   name,
   onDelete,
+  onMembers,
+  canDelete = true,
   resourceType,
   iconSx,
 }: TileActionsProps) {
@@ -82,12 +87,31 @@ export default function TileActions({
           paper: { sx: menuPaperSx },
         }}
       >
-        <MenuItem onClick={handleOpenConfirm} sx={{ color: "#EF4444" }}>
-          <ListItemIcon>
-            <DeleteOutlineIcon fontSize="small" sx={{ color: "#EF4444" }} />
-          </ListItemIcon>
-          Delete
-        </MenuItem>
+        {onMembers && (
+          <MenuItem
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              handleMenuClose();
+              onMembers();
+            }}
+            sx={{ color: "#ECECEC" }}
+          >
+            <ListItemIcon>
+              <PeopleOutlineRoundedIcon fontSize="small" sx={{ color: "#ECECEC" }} />
+            </ListItemIcon>
+            Members
+          </MenuItem>
+        )}
+
+        {canDelete && (
+          <MenuItem onClick={handleOpenConfirm} sx={{ color: "#EF4444" }}>
+            <ListItemIcon>
+              <DeleteOutlineIcon fontSize="small" sx={{ color: "#EF4444" }} />
+            </ListItemIcon>
+            Delete
+          </MenuItem>
+        )}
       </Menu>
 
       <Dialog

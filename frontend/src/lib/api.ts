@@ -14,6 +14,16 @@ export interface Workspace {
   createdAt: string;
   updatedAt: string;
   canvasesCount?: number;
+  isOwner?: boolean;
+}
+
+export interface WorkspaceMember {
+  userId: string;
+  name: string;
+  email: string;
+  image?: string | null;
+  role: "owner" | "member";
+  addedAt?: string | null;
 }
 
 export interface Canvas {
@@ -113,6 +123,23 @@ export const workspaceApi = {
 
   async delete(id: string): Promise<Workspace> {
     return request<Workspace>(`/api/workspaces/${id}`, {
+      method: "DELETE",
+    });
+  },
+
+  async getMembers(id: string): Promise<WorkspaceMember[]> {
+    return request<WorkspaceMember[]>(`/api/workspaces/${id}/members`);
+  },
+
+  async addMember(id: string, email: string): Promise<WorkspaceMember> {
+    return request<WorkspaceMember>(`/api/workspaces/${id}/members`, {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    });
+  },
+
+  async removeMember(id: string, userId: string): Promise<WorkspaceMember> {
+    return request<WorkspaceMember>(`/api/workspaces/${id}/members/${userId}`, {
       method: "DELETE",
     });
   },

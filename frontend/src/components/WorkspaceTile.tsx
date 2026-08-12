@@ -13,14 +13,18 @@ interface WorkspaceTileProps {
   id: string;
   name: string;
   canvases: number;
+  isOwner?: boolean;
   onDelete?: (id: string) => void;
+  onMembers?: (id: string) => void;
 }
 
 export default function WorkspaceTile({
   id,
   name,
   canvases,
+  isOwner = true,
   onDelete,
+  onMembers,
 }: WorkspaceTileProps) {
   return (
     <>
@@ -88,6 +92,8 @@ export default function WorkspaceTile({
                     name={name}
                     resourceType="workspace"
                     onDelete={() => onDelete?.(id)}
+                    onMembers={onMembers && isOwner ? () => onMembers(id) : undefined}
+                    canDelete={isOwner}
                     iconSx={{
                       color: "#777",
                       "&:hover": { color: "#ECECEC", bgcolor: "#222" },
