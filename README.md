@@ -111,8 +111,8 @@ Open http://localhost:5173, sign up, create a workspace, add a canvas, and start
 | ------------------------ | ------------ | ---------------------------------------------- |
 | `npm run dev`            | `backend/`   | Dev server on :3000 (`tsx watch`)              |
 | `npm run dev`            | `frontend/`  | Vite dev server on :5173                       |
-| `npm run build`          | root         | Installs + builds backend, then frontend       |
-| `npm run build`          | `backend/`   | `tsc` compile to `dist/`                       |
+| `npm run build`          | root         | Installs backend, runs `db:migrate`, builds backend, then frontend |
+| `npm run build`          | `backend/`   | `tsc` compile to `dist/`                                            |
 | `npm run build`          | `frontend/`  | `tsc -b && vite build` → `dist/`               |
 | `npm run db:generate`    | `backend/`   | Generate a Drizzle migration from schema       |
 | `npm run db:migrate`     | `backend/`   | Apply migrations                               |
@@ -123,7 +123,8 @@ Open http://localhost:5173, sign up, create a workspace, add a canvas, and start
 
 - `api/index.ts` imports the **compiled** backend (`backend/dist/app.js`) and re-exports it as Vercel serverless handlers (`GET`, `POST`, `PATCH`, `DELETE`, `OPTIONS`).
 - `vercel.json` sets the output directory to `frontend/dist`, rewrites `/api/*` → the serverless handler, and everything else → `index.html` (SPA fallback).
-- The root `npm run build` runs the backend build first (so `dist/` exists), then the frontend build.
+- The root `npm run build` installs backend deps, runs `db:migrate` (applies any new migrations to the database the build can reach), then builds the backend and frontend.
+- **Database at deploy time:** `db:migrate` reads `DATABASE_URL`. Make sure the `DATABASE_URL` Vercel env var is set as a regular (non-encrypted/secret) env var so it's available during builds in addition to runtime. Migrations are recorded in `drizzle.__drizzle_migrations`, so re-runs are no-ops.
 - `.gitignore` excludes `backend/dist/`, so the build step on Vercel is what produces it.
 
 ## Key files

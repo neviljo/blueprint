@@ -150,5 +150,5 @@ CLIENT_ORIGIN=http://localhost:5173
 | `npm run build`    | Compile to `dist/` (`tsc`)               |
 | `npm run start`    | Run compiled output (`node dist/index.js`) |
 | `npm run db:generate` | Generate a migration from schema      |
-| `npm run db:migrate`  | Apply migrations                        |
+| `npm run db:migrate`  | Apply migrations (also run automatically during the root Vercel build) |
 | `npm run db:push`  | Push schema without a migration file     |
