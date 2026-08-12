@@ -32,12 +32,6 @@ const menuPaperSx = {
   minWidth: 150,
 };
 
-const dialogPaperSx = {
-  bgcolor: "#1A1A1A",
-  border: "1px solid #2F2F2F",
-  color: "#ECECEC",
-};
-
 export default function TileActions({
   name,
   onDelete,
@@ -120,9 +114,6 @@ export default function TileActions({
         onClick={(e) => e.stopPropagation()}
         maxWidth="xs"
         fullWidth
-        slotProps={{
-          paper: { sx: dialogPaperSx },
-        }}
       >
         <DialogTitle>
           {resourceType === "workspace" ? "Delete Workspace" : "Delete Canvas"}

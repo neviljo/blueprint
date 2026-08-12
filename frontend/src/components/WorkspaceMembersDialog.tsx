@@ -23,13 +23,6 @@ import PersonRemoveRoundedIcon from "@mui/icons-material/PersonRemoveRounded";
 import { workspaceApi } from "../lib/api";
 import type { WorkspaceMember } from "../lib/api";
 
-const dialogPaperSx = {
-  bgcolor: "#1A1A1A",
-  border: "1px solid #2F2F2F",
-  color: "#ECECEC",
-  minHeight: 320,
-};
-
 interface WorkspaceMembersDialogProps {
   open: boolean;
   workspaceId: string;
@@ -101,10 +94,7 @@ export default function WorkspaceMembersDialog({
       open={open}
       onClose={onClose}
       fullWidth
-      maxWidth="sm"
-      slotProps={{
-        paper: { sx: dialogPaperSx },
-      }}
+      maxWidth="xs"
     >
       <DialogTitle>Workspace Members</DialogTitle>
 
