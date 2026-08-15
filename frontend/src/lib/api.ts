@@ -36,6 +36,19 @@ export interface Canvas {
   updatedAt: string;
 }
 
+// Signed Ably token request returned by GET /api/canvases/:id/ably-token.
+// Consumed by the Ably client via authCallback to join the canvas's realtime channel.
+// Mirrors ably-js's TokenRequest: `capability` is a JSON-encoded string.
+export interface AblyTokenRequest {
+  keyName: string;
+  ttl?: number;
+  capability: string;
+  clientId?: string;
+  timestamp: number;
+  nonce: string;
+  mac: string;
+}
+
 async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
   const url = endpoint.startsWith("http") ? endpoint : `${API_BASE_URL}${endpoint}`;
   
@@ -180,5 +193,9 @@ export const canvasApi = {
     return request<Canvas>(`/api/canvases/${id}`, {
       method: "DELETE",
     });
+  },
+
+  async getAblyToken(id: string): Promise<AblyTokenRequest> {
+    return request<AblyTokenRequest>(`/api/canvases/${id}/ably-token`);
   },
 };

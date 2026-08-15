@@ -29,7 +29,7 @@ backend/
 │       │   ├── auth.ts           # betterAuth instance (drizzle adapter)
 │       │   └── middleware.ts     # requireAuth guard
 │       ├── workspaces/           # routes.ts, service.ts, validators.ts
-│       └── canvases/             # routes.ts, service.ts, validators.ts
+│       └── canvases/             # routes.ts, service.ts, validators.ts, ably.ts (token minting)
 ├── drizzle.config.ts             # drizzle-kit config (schema, out dir)
 └── tsconfig.json
 ```
@@ -110,6 +110,7 @@ Validation: `name` trimmed, 1–100 characters.
 | GET    | `/api/canvases/:id`               | Get one canvas (owner-scoped via workspace join) |
 | PATCH  | `/api/canvases/:id`               | Rename `{ name }`                        |
 | PATCH  | `/api/canvases/:id/content`       | Save drawing `{ content }` (JSON string, defaults `"[]"`) |
+| GET    | `/api/canvases/:id/ably-token`    | Mint a short-lived Ably token scoped to this canvas's realtime channel |
 | DELETE | `/api/canvases/:id`               | Delete                                  |
 
 Ownership checks: canvas operations look up the canvas through an inner join on `workspaces.ownerId`, so a canvas from someone else's workspace is indistinguishable from one that doesn't exist.
@@ -140,7 +141,10 @@ DATABASE_URL=postgresql://...
 BETTER_AUTH_SECRET=<random secret>
 BETTER_AUTH_URL=http://localhost:3000
 CLIENT_ORIGIN=http://localhost:5173
+ABLY_API_KEY=<Ably app key>
 ```
+
+`ABLY_API_KEY` powers realtime collaboration: `GET /api/canvases/:id/ably-token` (auth-protected) mints a 1-hour token with `clientId` set to the user and `publish`/`subscribe`/`presence` capability on exactly `canvas:<canvasId>:collab`. The Ably key must be granted at least **Publish, Subscribe, and Presence** capabilities in the Ably dashboard — a key limited to Subscribe authenticates but cannot publish or enter presence.
 
 ## Scripts
 

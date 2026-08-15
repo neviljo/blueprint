@@ -4,6 +4,7 @@ import { zValidator } from "@hono/zod-validator";
 import { requireAuth } from "../auth/middleware.js";
 
 import { createCanvas,  getCanvasesByWorkspace, getCanvasById, updateCanvas, deleteCanvas, updateCanvasContent} from "./service.js";
+import { createCanvasTokenRequest } from "./ably.js";
 import { createCanvasSchema, updateCanvasSchema, updateCanvasContentSchema } from "./validators.js";
 
 const router = new Hono();
@@ -142,4 +143,28 @@ router.patch(
     return c.json(canvas);
   }
 );
+
+// Returns a signed Ably token request so the Excalidraw client can join the
+// realtime channel for this canvas. Only authenticated members of the
+// canvas's workspace can request one; the token is scoped to this canvas only.
+router.get("/:id/ably-token", requireAuth, async (c) => {
+  const user = c.get("user");
+  const id = c.req.param("id")!;
+
+  const canvas = await getCanvasById(id, user.id);
+
+  if (!canvas) {
+    return c.json(
+      {
+        message: "Canvas not found",
+      },
+      404
+    );
+  }
+
+  const tokenRequest = await createCanvasTokenRequest(id, user.id);
+
+  return c.json(tokenRequest);
+});
+
 export default router;

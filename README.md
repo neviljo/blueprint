@@ -40,6 +40,7 @@ See [backend/README.md](backend/README.md) and [frontend/README.md](frontend/REA
 | -------- | --------------------------------------------------------------------- |
 | Frontend | React 19, TypeScript, Vite 8, TanStack Router, Material UI, Excalidraw |
 | Backend  | Hono, Better Auth, Drizzle ORM, PostgreSQL (Neon), zod, `pg`          |
+| Realtime | Ably (token auth, presence for cursors, channels for scene sync)      |
 | Auth     | Better Auth (email/password), cookie-based sessions                    |
 | Deploy   | Vercel (serverless via `api/index.ts`), Node server for local dev      |
 
@@ -56,13 +57,23 @@ user ──< workspaces ──< canvases
 
 Canvas `content` stores the serialized Excalidraw scene (an array of `elements` plus `appState`) as a JSON string. Every workspace/canvas query is scoped by the current user's `ownerId`, so users can never see each other's data.
 
+## Realtime collaboration (Ably)
+
+While a canvas is open, the Excalidraw editor syncs live between members of the canvas's workspace:
+
+- **Presence** streams each user's pointer position and identity, rendered as collaborator cursors.
+- A **channel** (`canvas:<canvasId>:collab`) carries scene updates (`elements` + theme) between active users; changes are debounced and reconciled by element version, so stale scenes from newly-joined or reconnecting clients don't overwrite fresher content.
+- The frontend never sees the API key. It authenticates via `authCallback` → `GET /api/canvases/:id/ably-token`, which checks the session cookie and workspace membership, then returns a short-lived (1h) token scoped to **exactly that canvas's channel** with only `publish`/`subscribe`/`presence`.
+
+> **Setup:** set `ABLY_API_KEY` in `backend/.env` and on Vercel. In the Ably dashboard, the key must be granted at least **Publish, Subscribe, and Presence** capabilities — a key limited to Subscribe will authenticate but fail to publish or enter presence.
+
 ## API surface
 
 | Area | Endpoints |
 | ---- | --------- |
 | Auth | `GET /api/auth/get-session`, `POST /api/auth/sign-in/email`, `POST /api/auth/sign-up/email`, `POST /api/auth/sign-out` |
 | Workspaces | `GET/POST /api/workspaces`, `GET/PATCH/DELETE /api/workspaces/:id` |
-| Canvases | `GET /api/canvases/workspace/:workspaceId`, `POST /api/canvases`, `GET/PATCH/DELETE /api/canvases/:id`, `PATCH /api/canvases/:id/content` |
+| Canvases | `GET /api/canvases/workspace/:workspaceId`, `POST /api/canvases`, `GET/PATCH/DELETE /api/canvases/:id`, `PATCH /api/canvases/:id/content`, `GET /api/canvases/:id/ably-token` |
 | Health | `GET /health` |
 
 All workspace/canvas routes require a valid session.
@@ -92,6 +103,7 @@ Required env vars in `backend/.env`:
 | `BETTER_AUTH_SECRET` | Secret used to sign auth cookies/tokens             |
 | `BETTER_AUTH_URL`    | Base URL of the auth service                        |
 | `CLIENT_ORIGIN`      | Allowed CORS origin (falls back to `BETTER_AUTH_URL`, then `http://localhost:5173`) |
+| `ABLY_API_KEY`       | Ably app key used to mint realtime tokens for canvas collaboration    |
 
 ### 2. Frontend
 
@@ -141,5 +153,5 @@ Open http://localhost:5173, sign up, create a workspace, add a canvas, and start
 | `frontend/src/routes/` | File-based routes (landing, auth, dashboard, canvas) |
 | `frontend/src/lib/api.ts` | Typed fetch wrapper + auth/workspace/canvas API clients |
 | `frontend/src/lib/auth.ts` | Session cache + auth guards |
-| `frontend/src/components/CanvasWorkspace.tsx` | Excalidraw editor with debounced auto-save |
+| `frontend/src/components/CanvasWorkspace.tsx` | Excalidraw editor with debounced auto-save + Ably realtime collaboration |
 | `api/index.ts` | Vercel serverless adapter |
