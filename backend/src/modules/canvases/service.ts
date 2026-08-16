@@ -1,9 +1,10 @@
-import { and, desc, eq, gt, inArray, or } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, lte, or } from "drizzle-orm";
 import { hasWorkspaceAccess } from "../workspaces/service.js";
 import { HttpError } from "../errors.js";
 import { db } from "../../db/index.js";
 import {
   canvasDeltas,
+  canvasPresence,
   canvases,
   workspaceMembers,
   workspaces,
@@ -190,4 +191,99 @@ export async function getCanvasDeltasAfter(
     deltas,
     latestSeq: latest?.seq ?? afterSeq,
   };
+}
+
+export interface PresenceData {
+  name: string;
+  color: { background: string; stroke: string };
+}
+
+export async function upsertCanvasPresence(
+  id: string,
+  userId: string,
+  data: PresenceData
+) {
+  const canvas = await getCanvasById(id, userId);
+
+  if (!canvas) {
+    throw new HttpError(404, "Canvas not found");
+  }
+
+  await db
+    .insert(canvasPresence)
+    .values({
+      canvasId: id,
+      userId,
+      name: data.name,
+      color: data.color,
+      lastSeen: new Date(),
+    })
+    .onConflictDoUpdate({
+      target: [canvasPresence.canvasId, canvasPresence.userId],
+      set: {
+        name: data.name,
+        color: data.color,
+        lastSeen: new Date(),
+      },
+    });
+
+  return { ok: true };
+}
+
+export async function getCanvasPresence(
+  id: string,
+  userId: string,
+  activeMs = 15_000,
+  staleMs = 30_000
+) {
+  const canvas = await getCanvasById(id, userId);
+
+  if (!canvas) {
+    throw new HttpError(404, "Canvas not found");
+  }
+
+  const now = Date.now();
+
+  // Prune rows that stopped heartbeating well before the active window.
+  await db
+    .delete(canvasPresence)
+    .where(
+      and(
+        eq(canvasPresence.canvasId, id),
+        lte(canvasPresence.lastSeen, new Date(now - staleMs))
+      )
+    );
+
+  const members = await db
+    .select({
+      userId: canvasPresence.userId,
+      name: canvasPresence.name,
+      color: canvasPresence.color,
+    })
+    .from(canvasPresence)
+    .where(
+      and(
+        eq(canvasPresence.canvasId, id),
+        gt(canvasPresence.lastSeen, new Date(now - activeMs))
+      )
+    )
+    .orderBy(asc(canvasPresence.name));
+
+  return members;
+}
+
+export async function removeCanvasPresence(id: string, userId: string) {
+  const canvas = await getCanvasById(id, userId);
+
+  if (!canvas) {
+    throw new HttpError(404, "Canvas not found");
+  }
+
+  await db
+    .delete(canvasPresence)
+    .where(
+      and(eq(canvasPresence.canvasId, id), eq(canvasPresence.userId, userId))
+    );
+
+  return { ok: true };
 }

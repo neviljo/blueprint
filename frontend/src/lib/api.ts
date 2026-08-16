@@ -57,6 +57,13 @@ export interface SyncPollResult {
   latestSeq: number;
 }
 
+// A user marked online for a canvas via HTTP presence heartbeats.
+export interface PresenceMember {
+  userId: string;
+  name: string;
+  color: { background: string; stroke: string };
+}
+
 // Signed Ably token request returned by GET /api/canvases/:id/ably-token.
 // Consumed by the Ably client via authCallback to join the canvas's realtime channel.
 // Mirrors ably-js's TokenRequest: `capability` is a JSON-encoded string.
@@ -231,5 +238,25 @@ export const canvasApi = {
     return request<SyncPollResult>(
       `/api/canvases/${id}/sync?after=${encodeURIComponent(after)}`
     );
+  },
+
+  async postPresence(
+    id: string,
+    data: { name: string; color: { background: string; stroke: string } }
+  ): Promise<{ ok: boolean }> {
+    return request(`/api/canvases/${id}/presence`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  },
+
+  async getPresence(id: string): Promise<{ members: PresenceMember[] }> {
+    return request(`/api/canvases/${id}/presence`);
+  },
+
+  async removePresence(id: string): Promise<{ ok: boolean }> {
+    return request(`/api/canvases/${id}/presence`, {
+      method: "DELETE",
+    });
   },
 };

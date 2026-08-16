@@ -34,3 +34,11 @@ export const canvasSyncSchema = z.object({
   sceneVersion: z.number(),
   full: z.boolean(),
 });
+
+export const presenceSchema = z.object({
+  name: z.string().trim().min(1).max(100),
+  color: z.object({
+    background: z.string().max(20),
+    stroke: z.string().max(20),
+  }),
+});

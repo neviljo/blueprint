@@ -128,6 +128,10 @@ const POINTER_THROTTLE_MS = 200;
 const FULL_SCENE_RESYNC_MS = 20000;
 /** How often to poll the HTTP sync log for remote scene changes. */
 const SCENE_POLL_MS = 2000;
+/** How often to send an HTTP presence heartbeat (keeps us marked online). */
+const PRESENCE_HEARTBEAT_MS = 10000;
+/** How often to poll HTTP presence for the collaborator avatar stack. */
+const PRESENCE_POLL_MS = 5000;
 /** Minimum gap between full-scene (force) broadcasts to absorb reconnect bursts. */
 const FULL_PUBLISH_COALESCE_MS = 2000;
 /** Delay after reconnecting before re-broadcasting the full scene. */
@@ -180,6 +184,10 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
   const lastDeltaSeqRef = useRef(0);
   const syncPollingRef = useRef(false);
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const myUserIdRef = useRef<string | null>(null);
+  const presenceInfoRef = useRef<{ name: string; color: CollabColor } | null>(null);
+  const presenceHeartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const presencePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectResyncTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const authFailedRef = useRef(false);
@@ -597,6 +605,47 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       }
     };
 
+    // HTTP presence: keep us marked online and refresh the collaborator avatar
+    // stack. Works independently of Ably, so avatars appear even when the
+    // realtime channel is unreachable.
+    const sendPresenceHeartbeat = async () => {
+      if (disposed) return;
+      const info = presenceInfoRef.current;
+      if (!info) return;
+      try {
+        await canvasApi.postPresence(canvasId, info);
+      } catch {
+        // Transient failure — the next heartbeat retries.
+      }
+    };
+
+    const updateCollaboratorsFromHttp = async () => {
+      if (disposed) return;
+      // When the realtime channel is connected, Ably presence is the richer
+      // source (it includes live pointers). Fall back to HTTP presence so the
+      // avatar stack still works when Ably is unreachable or reconnecting.
+      if (connectionStateRef.current === "connected") return;
+      try {
+        const { members } = await canvasApi.getPresence(canvasId);
+        const collaborators = new Map<SocketId, Collaborator>();
+
+        for (const member of members) {
+          if (member.userId === myUserIdRef.current) continue;
+
+          collaborators.set(member.userId as SocketId, {
+            id: member.userId,
+            username: member.name,
+            color: member.color,
+            pointer: undefined,
+          });
+        }
+
+        excalidrawRef.current?.updateScene({ collaborators });
+      } catch {
+        // Transient failure — the next poll retries.
+      }
+    };
+
     async function setupRealtime() {
       authFailedRef.current = false;
       setCollabError(null);
@@ -623,6 +672,10 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
           session.user?.name || session.user?.email || "Anonymous";
         const userId = session.user?.id || "anonymous";
         const color = colorForUser(userId);
+
+        myUserIdRef.current = userId;
+        presenceInfoRef.current = { name: userName, color };
+        sendPresenceHeartbeat();
 
         client = new Ably.Realtime({
           // Token is fetched from our authenticated backend, which verifies
@@ -765,6 +818,18 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
     pollTimerRef.current = setInterval(pollSync, SCENE_POLL_MS);
     pollSync();
 
+    // HTTP presence: heartbeat our online status and keep the avatar stack
+    // fresh without relying on the realtime channel.
+    presenceHeartbeatRef.current = setInterval(
+      sendPresenceHeartbeat,
+      PRESENCE_HEARTBEAT_MS
+    );
+    presencePollRef.current = setInterval(
+      updateCollaboratorsFromHttp,
+      PRESENCE_POLL_MS
+    );
+    updateCollaboratorsFromHttp();
+
     return () => {
       disposed = true;
       setIsCollaborating(false);
@@ -779,6 +844,18 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       if (pollTimerRef.current) {
         clearInterval(pollTimerRef.current);
         pollTimerRef.current = null;
+      }
+      if (presenceHeartbeatRef.current) {
+        clearInterval(presenceHeartbeatRef.current);
+        presenceHeartbeatRef.current = null;
+      }
+      if (presencePollRef.current) {
+        clearInterval(presencePollRef.current);
+        presencePollRef.current = null;
+      }
+      // Mark us offline via HTTP presence so our avatar disappears promptly.
+      if (myUserIdRef.current) {
+        canvasApi.removePresence(canvasId).catch(() => undefined);
       }
       if (resyncIntervalRef.current) {
         clearInterval(resyncIntervalRef.current);
