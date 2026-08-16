@@ -76,6 +76,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
   const [workspaceId, setWorkspaceId] = useState<string | null>(null);
   const [editorTheme, setEditorTheme] = useState<"dark" | "light">("dark");
   const [isCollaborating, setIsCollaborating] = useState(false);
+  const [collabError, setCollabError] = useState<string | null>(null);
   const isLight = editorTheme === "light";
 
   const navigate = useNavigate();
@@ -199,6 +200,10 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       } finally {
         loadingRef.current = false;
         setLoading(false);
+        currentSceneVersionRef.current = getSceneVersion(
+          currentContentRef.current.elements
+        );
+        receivedSceneRef.current = true;
       }
     }
 
@@ -207,41 +212,41 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
     }
   }, [canvasId]);
 
+  const refreshCollaborators = useCallback(async () => {
+    const channel = channelRef.current;
+    const myClientId = myClientIdRef.current;
+    if (!channel) return;
+
+    try {
+      const members = await channel.presence.get();
+      const collaborators = new Map<SocketId, Collaborator>();
+
+      for (const member of members) {
+        if (member.clientId === myClientId) continue;
+
+        const data = member.data as PresenceData | undefined;
+        if (!data?.name) continue;
+
+        collaborators.set(member.clientId as SocketId, {
+          id: member.clientId,
+          username: data.name,
+          color: data.color,
+          pointer: data.pointer
+            ? { x: data.pointer.x, y: data.pointer.y, tool: data.pointer.tool }
+            : undefined,
+        });
+      }
+
+      excalidrawRef.current?.updateScene({ collaborators });
+    } catch (err) {
+      console.warn("Failed to refresh collaborators:", err);
+    }
+  }, []);
+
   // Set up the Ably realtime connection: presence for live cursors and a
   // channel for scene synchronization between members of the workspace.
   useEffect(() => {
     let disposed = false;
-
-    const refreshCollaborators = async () => {
-      const channel = channelRef.current;
-      const myClientId = myClientIdRef.current;
-      if (!channel) return;
-
-      try {
-        const members = await channel.presence.get();
-        const collaborators = new Map<SocketId, Collaborator>();
-
-        for (const member of members) {
-          if (member.clientId === myClientId) continue;
-
-          const data = member.data as PresenceData | undefined;
-          if (!data?.name) continue;
-
-          collaborators.set(member.clientId as SocketId, {
-            id: member.clientId,
-            username: data.name,
-            color: data.color,
-            pointer: data.pointer
-              ? { x: data.pointer.x, y: data.pointer.y, tool: data.pointer.tool }
-              : undefined,
-          });
-        }
-
-        excalidrawRef.current?.updateScene({ collaborators });
-      } catch (err) {
-        console.warn("Failed to refresh collaborators:", err);
-      }
-    };
 
     const handlePresenceJoin = (member: Ably.PresenceMessage) => {
       if (member.clientId === myClientIdRef.current) return;
@@ -314,6 +319,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
     };
 
     async function setupRealtime() {
+      setCollabError(null);
       try {
         const session = await getCurrentSession();
         const userName =
@@ -357,12 +363,18 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
 
         if (!disposed) {
           setIsCollaborating(true);
+          refreshCollaborators();
         }
       } catch (error) {
         console.warn(
           "Realtime collaboration could not be enabled (is ABLY_API_KEY set on the backend?):",
           error
         );
+        if (!disposed) {
+          setCollabError(
+            "Live collaboration is unavailable. Check that ABLY_API_KEY is set with Publish/Subscribe/Presence capability."
+          );
+        }
       }
     }
 
@@ -371,6 +383,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
     return () => {
       disposed = true;
       setIsCollaborating(false);
+      setCollabError(null);
       receivedSceneRef.current = false;
       lastSceneSignatureRef.current = null;
       pendingRemoteSceneRef.current = null;
@@ -389,7 +402,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       }
       client?.close();
     };
-  }, [canvasId, publishScene]);
+  }, [canvasId, publishScene, refreshCollaborators]);
 
   // Save content to backend API
   const saveCanvasContent = useCallback(
@@ -474,9 +487,13 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
   );
 
   // Capture the Excalidraw imperative API (refs are unsupported since v0.17)
-  const handleExcalidrawAPI = useCallback((api: ExcalidrawImperativeAPI) => {
-    excalidrawRef.current = api;
-  }, []);
+  const handleExcalidrawAPI = useCallback(
+    (api: ExcalidrawImperativeAPI) => {
+      excalidrawRef.current = api;
+      refreshCollaborators();
+    },
+    [refreshCollaborators]
+  );
 
   // Toggle the whole editor between light and dark theme
   const handleToggleBackground = useCallback(() => {
@@ -553,6 +570,28 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
           )}
         </IconButton>
       </Tooltip>
+
+      {/* Realtime unavailable warning */}
+      {collabError && (
+        <Box
+          sx={{
+            position: "absolute",
+            top: 16,
+            right: 16,
+            zIndex: 10,
+            color: "#fbbf24",
+            bgcolor: "rgba(18, 18, 18, 0.9)",
+            border: "1px solid #3f3f46",
+            borderRadius: 1,
+            px: 1.5,
+            py: 0.75,
+            fontSize: "0.8rem",
+            maxWidth: 340,
+          }}
+        >
+          {collabError}
+        </Box>
+      )}
 
       {/* Main Canvas Viewport */}
       <Box sx={{ flexGrow: 1, width: "100%", height: "100%", position: "relative" }}>
