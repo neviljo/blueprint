@@ -120,14 +120,16 @@ const COLLAB_COLORS: CollabColor[] = [
   { background: "#22d3ee", stroke: "#155e75" },
 ];
 
-/** How long to wait after a local change before publishing it to the channel. */
-const SCENE_BROADCAST_DELAY = 200;
+/** Min gap between in-progress scene broadcasts (streams strokes while drawing). */
+const SCENE_BROADCAST_THROTTLE_MS = 250;
+/** How long to wait after the last change before a final trailing broadcast. */
+const SCENE_BROADCAST_DELAY = 250;
 /** Minimum interval between pointer presence updates. */
 const POINTER_THROTTLE_MS = 200;
 /** How often to re-broadcast the full scene as a safety net for dropped deltas. */
 const FULL_SCENE_RESYNC_MS = 20000;
 /** How often to poll the HTTP sync log for remote scene changes. */
-const SCENE_POLL_MS = 2000;
+const SCENE_POLL_MS = 500;
 /** How often to send an HTTP presence heartbeat (keeps us marked online). */
 const PRESENCE_HEARTBEAT_MS = 10000;
 /** How often to poll HTTP presence for the collaborator avatar stack. */
@@ -162,6 +164,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
   const navigate = useNavigate();
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const broadcastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastSceneBroadcastRef = useRef(0);
   const excalidrawRef = useRef<ExcalidrawImperativeAPI>(null);
   const currentContentRef = useRef<CanvasContent>({
     elements: [],
@@ -923,12 +926,22 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
     // might overwrite fresher content from members who are already here with
     // stale data loaded from the DB.
     if (receivedSceneRef.current) {
-      if (broadcastTimeoutRef.current) {
-        clearTimeout(broadcastTimeoutRef.current);
-      }
-      broadcastTimeoutRef.current = setTimeout(() => {
+      // Throttle (not debounce) so in-progress strokes stream to peers while
+      // they're being drawn; a trailing send flushes the final stroke state.
+      const now = Date.now();
+      if (now - lastSceneBroadcastRef.current >= SCENE_BROADCAST_THROTTLE_MS) {
+        lastSceneBroadcastRef.current = now;
         publishScene(elements, appState);
-      }, SCENE_BROADCAST_DELAY);
+      } else {
+        if (broadcastTimeoutRef.current) {
+          clearTimeout(broadcastTimeoutRef.current);
+        }
+        broadcastTimeoutRef.current = setTimeout(() => {
+          broadcastTimeoutRef.current = null;
+          lastSceneBroadcastRef.current = Date.now();
+          publishScene(elements, appState);
+        }, SCENE_BROADCAST_DELAY);
+      }
     }
 
     if (saveTimeoutRef.current) {
