@@ -196,6 +196,7 @@ export async function getCanvasDeltasAfter(
 export interface PresenceData {
   name: string;
   color: { background: string; stroke: string };
+  pointer?: { x: number; y: number; tool: "pointer" | "laser" } | null;
 }
 
 export async function upsertCanvasPresence(
@@ -216,6 +217,7 @@ export async function upsertCanvasPresence(
       userId,
       name: data.name,
       color: data.color,
+      pointer: data.pointer ?? null,
       lastSeen: new Date(),
     })
     .onConflictDoUpdate({
@@ -223,6 +225,7 @@ export async function upsertCanvasPresence(
       set: {
         name: data.name,
         color: data.color,
+        pointer: data.pointer ?? null,
         lastSeen: new Date(),
       },
     });
@@ -259,6 +262,7 @@ export async function getCanvasPresence(
       userId: canvasPresence.userId,
       name: canvasPresence.name,
       color: canvasPresence.color,
+      pointer: canvasPresence.pointer,
     })
     .from(canvasPresence)
     .where(

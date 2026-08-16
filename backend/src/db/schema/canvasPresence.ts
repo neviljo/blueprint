@@ -33,6 +33,10 @@ export const canvasPresence = pgTable(
 
     color: jsonb("color").notNull(),
 
+    // Latest known pointer position, so collaborators' cursors can be drawn
+    // over HTTP. Null when the user hasn't moved recently.
+    pointer: jsonb("pointer"),
+
     lastSeen: timestamp("last_seen").defaultNow().notNull(),
   },
   (table) => ({

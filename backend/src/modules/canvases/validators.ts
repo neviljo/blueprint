@@ -41,4 +41,12 @@ export const presenceSchema = z.object({
     background: z.string().max(20),
     stroke: z.string().max(20),
   }),
+  pointer: z
+    .object({
+      x: z.number(),
+      y: z.number(),
+      tool: z.enum(["pointer", "laser"]),
+    })
+    .nullable()
+    .optional(),
 });

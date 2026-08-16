@@ -174,6 +174,8 @@ router.get("/:id/sync", requireAuth, async (c) => {
 
   const result = await getCanvasDeltasAfter(id, user.id, parsedAfter);
 
+  const presence = await getCanvasPresence(id, user.id);
+
   return c.json({
     deltas: result.deltas.map((delta) => ({
       seq: delta.seq,
@@ -182,6 +184,7 @@ router.get("/:id/sync", requireAuth, async (c) => {
       full: (delta.payload as { full: boolean }).full,
     })),
     latestSeq: result.latestSeq,
+    presence,
   });
 });
 

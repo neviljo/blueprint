@@ -1,0 +1,1 @@
+ALTER TABLE "canvas_presence" ADD COLUMN "pointer" jsonb;

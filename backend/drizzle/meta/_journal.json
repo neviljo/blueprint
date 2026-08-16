@@ -43,6 +43,13 @@
       "when": 1786887910327,
       "tag": "0005_canvas_presence",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1786890043524,
+      "tag": "0006_presence_pointer",
+      "breakpoints": true
     }
   ]
 }

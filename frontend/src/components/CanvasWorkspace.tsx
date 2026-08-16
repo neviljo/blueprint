@@ -14,6 +14,7 @@ import type {
 import type { ExcalidrawElement } from "@excalidraw/excalidraw/element/types";
 import { useNavigate } from "@tanstack/react-router";
 import { canvasApi } from "../lib/api";
+import type { PresenceMember } from "../lib/api";
 import type { CanvasContent } from "../lib/types";
 import { getCurrentSession } from "../lib/auth";
 
@@ -132,8 +133,6 @@ const FULL_SCENE_RESYNC_MS = 20000;
 const SCENE_POLL_MS = 500;
 /** How often to send an HTTP presence heartbeat (keeps us marked online). */
 const PRESENCE_HEARTBEAT_MS = 10000;
-/** How often to poll HTTP presence for the collaborator avatar stack. */
-const PRESENCE_POLL_MS = 5000;
 /** Minimum gap between full-scene (force) broadcasts to absorb reconnect bursts. */
 const FULL_PUBLISH_COALESCE_MS = 2000;
 /** Delay after reconnecting before re-broadcasting the full scene. */
@@ -188,9 +187,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
   const syncPollingRef = useRef(false);
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const myUserIdRef = useRef<string | null>(null);
-  const presenceInfoRef = useRef<{ name: string; color: CollabColor } | null>(null);
   const presenceHeartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const presencePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectResyncTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const authFailedRef = useRef(false);
@@ -601,6 +598,8 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         if (result.latestSeq > lastDeltaSeqRef.current) {
           lastDeltaSeqRef.current = result.latestSeq;
         }
+        // Fold presence (avatars + live cursors) into the same round trip.
+        updateCollaboratorsFromHttp(result.presence);
       } catch {
         // Transient network/backend hiccup — the next poll will retry.
       } finally {
@@ -608,45 +607,53 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       }
     };
 
-    // HTTP presence: keep us marked online and refresh the collaborator avatar
-    // stack. Works independently of Ably, so avatars appear even when the
-    // realtime channel is unreachable.
+    // HTTP presence: keep us marked online (with our latest pointer) and
+    // refresh the collaborator avatar stack. Works independently of Ably, so
+    // avatars and cursors appear even when the realtime channel is unreachable.
     const sendPresenceHeartbeat = async () => {
       if (disposed) return;
-      const info = presenceInfoRef.current;
+      const info = myPresenceRef.current;
       if (!info) return;
       try {
-        await canvasApi.postPresence(canvasId, info);
+        await canvasApi.postPresence(canvasId, {
+          name: info.name,
+          color: info.color,
+          pointer: info.pointer,
+        });
       } catch {
         // Transient failure — the next heartbeat retries.
       }
     };
 
-    const updateCollaboratorsFromHttp = async () => {
+    const updateCollaboratorsFromHttp = (
+      members: PresenceMember[]
+    ) => {
       if (disposed) return;
       // When the realtime channel is connected, Ably presence is the richer
       // source (it includes live pointers). Fall back to HTTP presence so the
-      // avatar stack still works when Ably is unreachable or reconnecting.
+      // avatar stack and cursors still work when Ably is unreachable.
       if (connectionStateRef.current === "connected") return;
-      try {
-        const { members } = await canvasApi.getPresence(canvasId);
-        const collaborators = new Map<SocketId, Collaborator>();
 
-        for (const member of members) {
-          if (member.userId === myUserIdRef.current) continue;
+      const collaborators = new Map<SocketId, Collaborator>();
 
-          collaborators.set(member.userId as SocketId, {
-            id: member.userId,
-            username: member.name,
-            color: member.color,
-            pointer: undefined,
-          });
-        }
+      for (const member of members) {
+        if (member.userId === myUserIdRef.current) continue;
 
-        excalidrawRef.current?.updateScene({ collaborators });
-      } catch {
-        // Transient failure — the next poll retries.
+        collaborators.set(member.userId as SocketId, {
+          id: member.userId,
+          username: member.name,
+          color: member.color,
+          pointer: member.pointer
+            ? {
+                x: member.pointer.x,
+                y: member.pointer.y,
+                tool: member.pointer.tool,
+              }
+            : undefined,
+        });
       }
+
+      excalidrawRef.current?.updateScene({ collaborators });
     };
 
     async function setupRealtime() {
@@ -677,8 +684,6 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         const color = colorForUser(userId);
 
         myUserIdRef.current = userId;
-        presenceInfoRef.current = { name: userName, color };
-        sendPresenceHeartbeat();
 
         client = new Ably.Realtime({
           // Token is fetched from our authenticated backend, which verifies
@@ -700,6 +705,9 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
 
         ablyClientRef.current = client;
         myPresenceRef.current = { name: userName, color, pointer: null };
+        // Send our initial HTTP presence heartbeat right away so peers see us
+        // (and our avatar) even before any realtime connection is established.
+        sendPresenceHeartbeat();
 
         // Track connection state so we never publish into a dead socket, and
         // so peers resync automatically after a drop / reconnect.
@@ -827,11 +835,6 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       sendPresenceHeartbeat,
       PRESENCE_HEARTBEAT_MS
     );
-    presencePollRef.current = setInterval(
-      updateCollaboratorsFromHttp,
-      PRESENCE_POLL_MS
-    );
-    updateCollaboratorsFromHttp();
 
     return () => {
       disposed = true;
@@ -851,10 +854,6 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       if (presenceHeartbeatRef.current) {
         clearInterval(presenceHeartbeatRef.current);
         presenceHeartbeatRef.current = null;
-      }
-      if (presencePollRef.current) {
-        clearInterval(presencePollRef.current);
-        presencePollRef.current = null;
       }
       // Mark us offline via HTTP presence so our avatar disappears promptly.
       if (myUserIdRef.current) {
@@ -952,7 +951,9 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
     }, 1500);
   };
 
-  // Stream pointer position to other members via presence updates (throttled)
+  // Stream pointer position to other members so they can render our live
+  // cursor (arrow + name). Uses Ably presence when the realtime channel is
+  // connected, and falls back to the HTTP presence endpoint otherwise.
   const handlePointerUpdate = useCallback(
     (payload: {
       pointer: { x: number; y: number; tool: "pointer" | "laser" };
@@ -962,12 +963,8 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       if (now - lastPointerPublishRef.current < POINTER_THROTTLE_MS) return;
       lastPointerPublishRef.current = now;
 
-      const channel = channelRef.current;
       const presence = myPresenceRef.current;
-      if (!channel || !presence) return;
-      // Skip presence updates while the connection is down — they'd otherwise
-      // pile up as failing sends on the dead socket.
-      if (connectionStateRef.current !== "connected") return;
+      if (!presence) return;
 
       const updated: PresenceData = {
         ...presence,
@@ -978,9 +975,22 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         },
       };
       myPresenceRef.current = updated;
-      channel.presence.update(updated).catch(() => undefined);
+
+      const channel = channelRef.current;
+      if (channel && connectionStateRef.current === "connected") {
+        channel.presence.update(updated).catch(() => undefined);
+      } else {
+        // HTTP path — works when Ably is unreachable.
+        canvasApi
+          .postPresence(canvasId, {
+            name: updated.name,
+            color: updated.color,
+            pointer: updated.pointer,
+          })
+          .catch(() => undefined);
+      }
     },
-    []
+    [canvasId]
   );
 
   // Capture the Excalidraw imperative API (refs are unsupported since v0.17)

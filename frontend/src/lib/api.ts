@@ -55,6 +55,7 @@ export interface CanvasDeltaEnvelope {
 export interface SyncPollResult {
   deltas: CanvasDeltaEnvelope[];
   latestSeq: number;
+  presence: PresenceMember[];
 }
 
 // A user marked online for a canvas via HTTP presence heartbeats.
@@ -62,6 +63,7 @@ export interface PresenceMember {
   userId: string;
   name: string;
   color: { background: string; stroke: string };
+  pointer?: { x: number; y: number; tool: "pointer" | "laser" } | null;
 }
 
 // Signed Ably token request returned by GET /api/canvases/:id/ably-token.
@@ -242,7 +244,11 @@ export const canvasApi = {
 
   async postPresence(
     id: string,
-    data: { name: string; color: { background: string; stroke: string } }
+    data: {
+      name: string;
+      color: { background: string; stroke: string };
+      pointer?: { x: number; y: number; tool: "pointer" | "laser" } | null;
+    }
   ): Promise<{ ok: boolean }> {
     return request(`/api/canvases/${id}/presence`, {
       method: "POST",
