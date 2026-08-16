@@ -29,6 +29,13 @@
       "when": 1786547171064,
       "tag": "0003_motionless_hobgoblin",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1786879194159,
+      "tag": "0004_safe_justin_hammer",
+      "breakpoints": true
     }
   ]
 }

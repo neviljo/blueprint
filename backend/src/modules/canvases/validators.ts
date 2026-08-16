@@ -21,3 +21,16 @@ export const updateCanvasSchema = z.object({
 export const updateCanvasContentSchema = z.object({
   content: z.string(),
 });
+
+const elementSchema = z.object({
+  id: z.string(),
+  version: z.number(),
+  versionNonce: z.number().optional(),
+  // Accept any extra fields from the Excalidraw element shape.
+}).passthrough();
+
+export const canvasSyncSchema = z.object({
+  elements: z.array(elementSchema).max(5000),
+  sceneVersion: z.number(),
+  full: z.boolean(),
+});

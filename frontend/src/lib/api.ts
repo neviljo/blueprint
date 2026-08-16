@@ -32,8 +32,29 @@ export interface Canvas {
   workspaceId: string;
   userId: string;
   content?: string | CanvasContent | null;
+  contentSeq?: number;
   createdAt: string;
   updatedAt: string;
+}
+
+// A scene change broadcast over the HTTP sync path. Mirrors the shape of the
+// realtime (Ably) SceneMessage minus chunking, which is unnecessary over HTTP.
+export interface CanvasDelta {
+  elements: unknown[];
+  sceneVersion: number;
+  full: boolean;
+}
+
+export interface CanvasDeltaEnvelope {
+  seq: number;
+  elements: unknown[];
+  sceneVersion: number;
+  full: boolean;
+}
+
+export interface SyncPollResult {
+  deltas: CanvasDeltaEnvelope[];
+  latestSeq: number;
 }
 
 // Signed Ably token request returned by GET /api/canvases/:id/ably-token.
@@ -197,5 +218,18 @@ export const canvasApi = {
 
   async getAblyToken(id: string): Promise<AblyTokenRequest> {
     return request<AblyTokenRequest>(`/api/canvases/${id}/ably-token`);
+  },
+
+  async postDelta(id: string, delta: CanvasDelta): Promise<{ seq: number }> {
+    return request(`/api/canvases/${id}/sync`, {
+      method: "POST",
+      body: JSON.stringify(delta),
+    });
+  },
+
+  async getDeltas(id: string, after: number): Promise<SyncPollResult> {
+    return request<SyncPollResult>(
+      `/api/canvases/${id}/sync?after=${encodeURIComponent(after)}`
+    );
   },
 };

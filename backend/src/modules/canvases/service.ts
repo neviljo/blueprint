@@ -1,8 +1,13 @@
-import { and, desc, eq, inArray, or } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, or } from "drizzle-orm";
 import { hasWorkspaceAccess } from "../workspaces/service.js";
 import { HttpError } from "../errors.js";
 import { db } from "../../db/index.js";
-import { canvases, workspaceMembers, workspaces } from "../../db/schema/index.js";
+import {
+  canvasDeltas,
+  canvases,
+  workspaceMembers,
+  workspaces,
+} from "../../db/schema/index.js";
 
 async function assertWorkspaceAccess(workspaceId: string, userId: string) {
   const workspace = await hasWorkspaceAccess(workspaceId, userId);
@@ -106,14 +111,83 @@ export async function updateCanvasContent(id: string, userId: string, content: s
     return null;
   }
 
+  // Record the highest delta seq this save already includes so a joining
+  // client can poll "after" exactly this snapshot.
+  const [latest] = await db
+    .select({ seq: canvasDeltas.seq })
+    .from(canvasDeltas)
+    .where(eq(canvasDeltas.canvasId, id))
+    .orderBy(desc(canvasDeltas.seq))
+    .limit(1);
+
   const [updated] = await db
     .update(canvases)
     .set({
       content,
+      contentSeq: latest?.seq ?? 0,
       updatedAt: new Date(),
     })
     .where(eq(canvases.id, id))
     .returning();
 
   return updated;
+}
+
+export async function appendCanvasDelta(
+  id: string,
+  userId: string,
+  clientId: string,
+  payload: unknown
+) {
+  const canvas = await getCanvasById(id, userId);
+
+  if (!canvas) {
+    throw new HttpError(404, "Canvas not found");
+  }
+
+  const [delta] = await db
+    .insert(canvasDeltas)
+    .values({
+      canvasId: id,
+      clientId,
+      payload,
+    })
+    .returning();
+
+  return delta;
+}
+
+export async function getCanvasDeltasAfter(
+  id: string,
+  userId: string,
+  afterSeq: number,
+  limit = 500
+) {
+  const canvas = await getCanvasById(id, userId);
+
+  if (!canvas) {
+    throw new HttpError(404, "Canvas not found");
+  }
+
+  const deltas = await db
+    .select({
+      seq: canvasDeltas.seq,
+      payload: canvasDeltas.payload,
+    })
+    .from(canvasDeltas)
+    .where(and(eq(canvasDeltas.canvasId, id), gt(canvasDeltas.seq, afterSeq)))
+    .orderBy(canvasDeltas.seq)
+    .limit(limit);
+
+  const [latest] = await db
+    .select({ seq: canvasDeltas.seq })
+    .from(canvasDeltas)
+    .where(eq(canvasDeltas.canvasId, id))
+    .orderBy(desc(canvasDeltas.seq))
+    .limit(1);
+
+  return {
+    deltas,
+    latestSeq: latest?.seq ?? afterSeq,
+  };
 }

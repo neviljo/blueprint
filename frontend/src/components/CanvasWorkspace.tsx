@@ -126,6 +126,8 @@ const SCENE_BROADCAST_DELAY = 200;
 const POINTER_THROTTLE_MS = 200;
 /** How often to re-broadcast the full scene as a safety net for dropped deltas. */
 const FULL_SCENE_RESYNC_MS = 20000;
+/** How often to poll the HTTP sync log for remote scene changes. */
+const SCENE_POLL_MS = 2000;
 /** Minimum gap between full-scene (force) broadcasts to absorb reconnect bursts. */
 const FULL_PUBLISH_COALESCE_MS = 2000;
 /** Delay after reconnecting before re-broadcasting the full scene. */
@@ -174,6 +176,10 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
   const broadcastedElementVersionsRef = useRef<Map<string, number>>(new Map());
   const resyncIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastFullPublishRef = useRef(0);
+  const lastFullSnapshotVersionRef = useRef(-1);
+  const lastDeltaSeqRef = useRef(0);
+  const syncPollingRef = useRef(false);
+  const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectResyncTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const authFailedRef = useRef(false);
@@ -235,21 +241,16 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
     });
   }, []);
 
-  // Broadcast local changes. Normally only the elements that changed since the
-  // last broadcast are sent (a small delta), matching Excalidraw's own collab
-  // protocol; `force` sends the whole scene (e.g. when a member joins).
+  // Broadcast local changes. The delta is always POSTed to the HTTP sync log
+  // (the reliable source of truth), and also published to Ably as a fast path
+  // when the realtime connection is up. `force` sends the whole scene (e.g.
+  // on a join or periodic resync).
   const publishScene = useCallback(
     (
       elements: readonly ExcalidrawElement[],
       appState: Partial<AppState>,
       force = false
     ) => {
-      const channel = channelRef.current;
-      if (!channel) return;
-      // Never publish into a disconnected/suspended socket — drop instead of
-      // letting Ably queue a flood of failing sends.
-      if (connectionStateRef.current !== "connected") return;
-
       const cleanAppState: SceneMessage["appState"] = {
         theme: appState.theme,
         viewBackgroundColor: appState.viewBackgroundColor,
@@ -259,9 +260,11 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
 
       let toSend: ExcalidrawElement[];
       if (force) {
-        // Coalesce full-scene broadcasts: reconnect/resync/join can otherwise
-        // fire several full publishes in quick succession and trip Ably's
-        // per-connection message rate limit.
+        // Skip redundant full snapshots: only broadcast when the scene version
+        // actually changed, and coalesce so reconnect/join/resync bursts can't
+        // flood the sync log or Ably's per-connection rate limit.
+        if (lastFullSnapshotVersionRef.current === sceneVersion) return;
+        lastFullSnapshotVersionRef.current = sceneVersion;
         const now = Date.now();
         if (now - lastFullPublishRef.current < FULL_PUBLISH_COALESCE_MS) return;
         lastFullPublishRef.current = now;
@@ -281,14 +284,32 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         }
       }
 
-      publishMessage(channel, {
-        elements: toSend,
-        appState: cleanAppState,
-        sceneVersion,
-        full: force,
-      });
+      // HTTP sync log — works regardless of Ably connectivity.
+      canvasApi
+        .postDelta(canvasId, {
+          elements: toSend,
+          sceneVersion,
+          full: force,
+        })
+        .then((res) => {
+          if (res.seq > lastDeltaSeqRef.current) {
+            lastDeltaSeqRef.current = res.seq;
+          }
+        })
+        .catch((err) => console.warn("Failed to post sync delta:", err));
+
+      // Ably fast path — only when connected.
+      const channel = channelRef.current;
+      if (channel && connectionStateRef.current === "connected") {
+        publishMessage(channel, {
+          elements: toSend,
+          appState: cleanAppState,
+          sceneVersion,
+          full: force,
+        });
+      }
     },
-    [publishMessage]
+    [canvasId, publishMessage]
   );
 
   // Fetch initial canvas data from backend API
@@ -301,6 +322,9 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         let parsedContent: CanvasContent | null = null;
         if (data) {
           if (data.workspaceId) setWorkspaceId(data.workspaceId);
+          // Deltas after this snapshot's seq are still missing from it, so
+          // polling starts there.
+          lastDeltaSeqRef.current = data.contentSeq ?? 0;
 
           if (data.content && typeof data.content === "string") {
             try {
@@ -473,6 +497,13 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         getSceneVersion(nextElements)
       );
 
+      // Mark received elements as "already broadcast" so we don't echo remote
+      // changes straight back out. Local edits to the same element get a higher
+      // version and are still sent.
+      for (const element of data.elements) {
+        broadcastedElementVersionsRef.current.set(element.id, element.version);
+      }
+
       excalidrawRef.current?.updateScene({
         elements: nextElements,
         appState: {
@@ -536,6 +567,34 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       }
 
       applyScene(data);
+    };
+
+    // Poll the HTTP sync log for remote scene changes. This is the reliable
+    // path that works even when the realtime channel is unreachable. Deltas
+    // are fed through the same version-guarded merge as Ably messages.
+    const pollSync = async () => {
+      if (disposed || loadingRef.current || syncPollingRef.current) return;
+      syncPollingRef.current = true;
+      try {
+        const result = await canvasApi.getDeltas(
+          canvasId,
+          lastDeltaSeqRef.current
+        );
+        for (const delta of result.deltas) {
+          applyScene({
+            elements: delta.elements as ExcalidrawElement[],
+            sceneVersion: delta.sceneVersion,
+            full: delta.full,
+          });
+        }
+        if (result.latestSeq > lastDeltaSeqRef.current) {
+          lastDeltaSeqRef.current = result.latestSeq;
+        }
+      } catch {
+        // Transient network/backend hiccup — the next poll will retry.
+      } finally {
+        syncPollingRef.current = false;
+      }
     };
 
     async function setupRealtime() {
@@ -629,7 +688,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
                 // Token minting failed — retrying won't help, surface it.
                 setCollabStatus("offline");
                 setCollabError(
-                  "Live collaboration is unavailable. Check that ABLY_API_KEY is set with Publish/Subscribe/Presence capability."
+                  "Live cursors are unavailable (realtime connection failed). Scene changes still sync automatically."
                 );
               } else {
                 // Transient network failure — keep retrying in the background.
@@ -688,7 +747,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
           if (authFailedRef.current) {
             setCollabStatus("offline");
             setCollabError(
-              "Live collaboration is unavailable. Check that ABLY_API_KEY is set with Publish/Subscribe/Presence capability."
+              "Live cursors are unavailable (realtime connection failed). Scene changes still sync automatically."
             );
           } else if (client) {
             // Transient failure — keep trying instead of giving up.
@@ -701,6 +760,11 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
 
     setupRealtime();
 
+    // Poll the HTTP sync log for remote changes (reliable path — independent
+    // of the Ably connection).
+    pollTimerRef.current = setInterval(pollSync, SCENE_POLL_MS);
+    pollSync();
+
     return () => {
       disposed = true;
       setIsCollaborating(false);
@@ -712,6 +776,10 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       myClientIdRef.current = null;
       myPresenceRef.current = null;
 
+      if (pollTimerRef.current) {
+        clearInterval(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
       if (resyncIntervalRef.current) {
         clearInterval(resyncIntervalRef.current);
         resyncIntervalRef.current = null;
