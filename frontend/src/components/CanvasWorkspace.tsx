@@ -123,7 +123,7 @@ const COLLAB_COLORS: CollabColor[] = [
 /** How long to wait after a local change before publishing it to the channel. */
 const SCENE_BROADCAST_DELAY = 200;
 /** Minimum interval between pointer presence updates. */
-const POINTER_THROTTLE_MS = 100;
+const POINTER_THROTTLE_MS = 150;
 /** How often to re-broadcast the full scene as a safety net for dropped deltas. */
 const FULL_SCENE_RESYNC_MS = 20000;
 
@@ -142,6 +142,9 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
   const [editorTheme, setEditorTheme] = useState<"dark" | "light">("dark");
   const [isCollaborating, setIsCollaborating] = useState(false);
   const [collabError, setCollabError] = useState<string | null>(null);
+  const [collabStatus, setCollabStatus] = useState<
+    "connecting" | "live" | "reconnecting" | "offline"
+  >("connecting");
   const isLight = editorTheme === "light";
 
   const navigate = useNavigate();
@@ -155,6 +158,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
   const loadingRef = useRef(true);
   const ablyClientRef = useRef<Ably.Realtime | null>(null);
   const channelRef = useRef<Ably.RealtimeChannel | null>(null);
+  const connectionStateRef = useRef<Ably.ConnectionState>("initialized");
   const myClientIdRef = useRef<string | null>(null);
   const myPresenceRef = useRef<PresenceData | null>(null);
   const currentSceneVersionRef = useRef(0);
@@ -232,6 +236,9 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
     ) => {
       const channel = channelRef.current;
       if (!channel) return;
+      // Never publish into a disconnected/suspended socket — drop instead of
+      // letting Ably queue a flood of failing sends.
+      if (connectionStateRef.current !== "connected") return;
 
       const cleanAppState: SceneMessage["appState"] = {
         theme: appState.theme,
@@ -537,6 +544,50 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         ablyClientRef.current = client;
         myPresenceRef.current = { name: userName, color, pointer: null };
 
+        // Track connection state so we never publish into a dead socket, and
+        // so peers resync automatically after a drop / reconnect.
+        client.connection.on((stateChange) => {
+          const state = stateChange.current;
+          connectionStateRef.current = state;
+
+          switch (state) {
+            case "connected": {
+              if (disposed) return;
+              setCollabStatus("live");
+              setCollabError(null);
+              // Fresh connection (initial or after a drop) — resync peers and
+              // refresh the member list once the channel is available.
+              if (channelRef.current) {
+                refreshCollaborators();
+                publishScene(
+                  currentContentRef.current.elements,
+                  currentContentRef.current.appState,
+                  true
+                );
+              }
+              break;
+            }
+            case "disconnected":
+            case "suspended":
+              if (disposed) return;
+              setCollabStatus("reconnecting");
+              break;
+            case "failed":
+              if (disposed) return;
+              setCollabStatus("offline");
+              setCollabError(
+                "Live collaboration is unavailable. Check that ABLY_API_KEY is set with Publish/Subscribe/Presence capability."
+              );
+              break;
+            default:
+              break;
+          }
+
+          if (stateChange.reason && state !== "connected") {
+            console.warn("Ably connection state change:", state, stateChange.reason);
+          }
+        });
+
         await client.connection.whenState("connected");
 
         if (disposed) {
@@ -576,6 +627,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
           error
         );
         if (!disposed) {
+          setCollabStatus("offline");
           setCollabError(
             "Live collaboration is unavailable. Check that ABLY_API_KEY is set with Publish/Subscribe/Presence capability."
           );
@@ -611,6 +663,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         channel.unsubscribe();
         channel.detach().catch(() => undefined);
       }
+      client?.connection.off();
       client?.close();
     };
   }, [canvasId, publishScene, refreshCollaborators]);
@@ -682,6 +735,9 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       const channel = channelRef.current;
       const presence = myPresenceRef.current;
       if (!channel || !presence) return;
+      // Skip presence updates while the connection is down — they'd otherwise
+      // pile up as failing sends on the dead socket.
+      if (connectionStateRef.current !== "connected") return;
 
       const updated: PresenceData = {
         ...presence,
@@ -801,6 +857,49 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
           }}
         >
           {collabError}
+        </Box>
+      )}
+
+      {/* Live collaboration status indicator */}
+      {!collabError && (isCollaborating || collabStatus === "connecting") && (
+        <Box
+          sx={{
+            position: "absolute",
+            top: 16,
+            right: 16,
+            zIndex: 10,
+            display: "flex",
+            alignItems: "center",
+            gap: 0.75,
+            color: "#A6A6A6",
+            bgcolor: "rgba(18, 18, 18, 0.9)",
+            border: "1px solid #1f1f1f",
+            borderRadius: 1,
+            px: 1.25,
+            py: 0.5,
+            fontSize: "0.75rem",
+          }}
+        >
+          <Box
+            sx={{
+              width: 8,
+              height: 8,
+              borderRadius: "50%",
+              bgcolor:
+                collabStatus === "live"
+                  ? "#34d399"
+                  : collabStatus === "reconnecting"
+                    ? "#fbbf24"
+                    : "#f87171",
+            }}
+          />
+          {collabStatus === "live"
+            ? "Live"
+            : collabStatus === "reconnecting"
+              ? "Reconnecting…"
+              : collabStatus === "connecting"
+                ? "Connecting…"
+                : "Offline"}
         </Box>
       )}
 
