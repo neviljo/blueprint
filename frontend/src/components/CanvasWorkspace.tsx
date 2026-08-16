@@ -122,7 +122,7 @@ const COLLAB_COLORS: CollabColor[] = [
 ];
 
 /** Min gap between in-progress scene broadcasts (streams strokes while drawing). */
-const SCENE_BROADCAST_THROTTLE_MS = 250;
+const SCENE_BROADCAST_THROTTLE_MS = 100;
 /** How long to wait after the last change before a final trailing broadcast. */
 const SCENE_BROADCAST_DELAY = 250;
 /** Minimum interval between pointer presence updates. */
@@ -132,7 +132,7 @@ const POINTER_IDLE_CLEAR_MS = 1500;
 /** How often to re-broadcast the full scene as a safety net for dropped deltas. */
 const FULL_SCENE_RESYNC_MS = 20000;
 /** How often to poll the HTTP sync log for remote scene changes. */
-const SCENE_POLL_MS = 500;
+const SCENE_POLL_MS = 300;
 /** How often to send an HTTP presence heartbeat (keeps us marked online). */
 const PRESENCE_HEARTBEAT_MS = 10000;
 /** Minimum gap between full-scene (force) broadcasts to absorb reconnect bursts. */
@@ -632,10 +632,10 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       members: PresenceMember[]
     ) => {
       if (disposed) return;
-      // When the realtime channel is connected, Ably presence is the richer
-      // source (it includes live pointers). Fall back to HTTP presence so the
-      // avatar stack and cursors still work when Ably is unreachable.
-      if (connectionStateRef.current === "connected") return;
+      // Always populate the collaborators map from HTTP presence so avatars
+      // and cursors render in every connectivity mix. When Ably is connected,
+      // its presence events call refreshCollaborators which overrides this
+      // with the smoother realtime pointers.
 
       const collaborators = new Map<SocketId, Collaborator>();
 
@@ -959,8 +959,9 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
   };
 
   // Stream pointer position to other members so they can render our live
-  // cursor (arrow + name). Uses Ably presence when the realtime channel is
-  // connected, and falls back to the HTTP presence endpoint otherwise.
+  // cursor (arrow + name). Always posts to the HTTP presence endpoint so it
+  // reaches every peer regardless of connectivity; when the Ably channel is
+  // connected it also updates Ably presence for smoother realtime delivery.
   const publishPointer = useCallback(
     (pointer: { x: number; y: number; tool: "pointer" | "laser" } | null) => {
       const presence = myPresenceRef.current;
@@ -969,18 +970,17 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       const updated: PresenceData = { ...presence, pointer };
       myPresenceRef.current = updated;
 
+      canvasApi
+        .postPresence(canvasId, {
+          name: updated.name,
+          color: updated.color,
+          pointer,
+        })
+        .catch(() => undefined);
+
       const channel = channelRef.current;
       if (channel && connectionStateRef.current === "connected") {
         channel.presence.update(updated).catch(() => undefined);
-      } else {
-        // HTTP path — works when Ably is unreachable.
-        canvasApi
-          .postPresence(canvasId, {
-            name: updated.name,
-            color: updated.color,
-            pointer,
-          })
-          .catch(() => undefined);
       }
     },
     [canvasId]
@@ -1001,6 +1001,17 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         tool: payload.pointer.tool,
       });
 
+      // While actively drawing, stream the in-progress scene straight from
+      // pointer movement — a safety net that doesn't rely on onChange's
+      // cadence. publishScene dedupes by element version, so repeated calls
+      // are no-ops when nothing changed.
+      if (payload.button === "down") {
+        const elements = excalidrawRef.current?.getSceneElements();
+        if (elements) {
+          publishScene(elements, currentContentRef.current.appState);
+        }
+      }
+
       // Clear the cursor after the pointer goes idle so it fades instead of
       // freezing at the last position.
       if (pointerIdleTimeoutRef.current) {
@@ -1011,13 +1022,16 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         publishPointer(null);
       }, POINTER_IDLE_CLEAR_MS);
     },
-    [publishPointer]
+    [publishPointer, publishScene]
   );
 
   // Capture the Excalidraw imperative API (refs are unsupported since v0.17)
   const handleExcalidrawAPI = useCallback(
     (api: ExcalidrawImperativeAPI) => {
       excalidrawRef.current = api;
+      // Collaboration UI (avatars/cursors) is enabled via HTTP presence —
+      // independent of whether the realtime channel ever connects.
+      setIsCollaborating(true);
       refreshCollaborators();
     },
     [refreshCollaborators]
