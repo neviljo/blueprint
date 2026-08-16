@@ -42,10 +42,24 @@ interface PresenceData {
 /** Payload broadcast on the canvas channel to sync the scene. */
 interface SceneMessage {
   elements: ExcalidrawElement[];
-  appState: {
+  appState?: {
     theme?: "light" | "dark";
     viewBackgroundColor?: string;
   };
+  /** Present when a large scene is split across multiple messages. */
+  chunk?: {
+    index: number;
+    total: number;
+    nonce: string;
+  };
+}
+
+// Ably caps each published message at 65536 bytes; chunked scene parts use a
+// conservative budget so the payload plus protocol overhead stays well under.
+const SCENE_CHUNK_BYTES = 32000;
+
+function byteLength(str: string): number {
+  return new TextEncoder().encode(str).length;
 }
 
 const COLLAB_COLORS: CollabColor[] = [
@@ -97,6 +111,17 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
   const receivedSceneRef = useRef(false);
   const pendingRemoteSceneRef = useRef<CanvasContent | null>(null);
   const lastPointerPublishRef = useRef(0);
+  const sceneChunksRef = useRef<
+    Map<
+      string,
+      {
+        nonce: string;
+        total: number;
+        parts: Map<number, ExcalidrawElement[]>;
+        appState?: SceneMessage["appState"];
+      }
+    >
+  >(new Map());
 
   // Publish the current scene to the channel. `force` bypasses the signature
   // dedup so we can share our scene with newly-joined members.
@@ -117,14 +142,67 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       if (!force && signature === lastSceneSignatureRef.current) return;
       lastSceneSignatureRef.current = signature;
 
-      channel
-        .publish("scene", {
-          elements: [...elements],
-          appState: cleanAppState,
-        } satisfies SceneMessage)
-        .catch((error) => {
-          console.warn("Failed to broadcast scene:", error);
-        });
+      const fullElements = [...elements];
+      const payload = JSON.stringify({
+        elements: fullElements,
+        appState: cleanAppState,
+      });
+
+      // Small scene: publish in a single message.
+      if (byteLength(payload) <= SCENE_CHUNK_BYTES) {
+        channel
+          .publish("scene", {
+            elements: fullElements,
+            appState: cleanAppState,
+          } satisfies SceneMessage)
+          .catch((error) => {
+            console.warn("Failed to broadcast scene:", error);
+          });
+        return;
+      }
+
+      // Large scene: split elements into parts that each stay under the byte
+      // budget, tagged with a shared nonce so receivers can reassemble them.
+      const nonce = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const parts: ExcalidrawElement[][] = [];
+      let part: ExcalidrawElement[] = [];
+      let partSize = 0;
+
+      for (const element of fullElements) {
+        const elementBytes = byteLength(JSON.stringify(element));
+        if (part.length > 0 && partSize + elementBytes > SCENE_CHUNK_BYTES) {
+          parts.push(part);
+          part = [element];
+          partSize = elementBytes;
+        } else {
+          part.push(element);
+          partSize += elementBytes;
+        }
+      }
+      if (part.length > 0) parts.push(part);
+
+      const total = parts.length;
+      const publishes = parts.map((partElements, index) => {
+        const isLast = index === total - 1;
+        return channel.publish(
+          "scene",
+          {
+            elements: partElements,
+            appState: isLast ? cleanAppState : undefined,
+            chunk: { index, total, nonce },
+          } satisfies SceneMessage
+        );
+      });
+
+      Promise.allSettled(publishes).then((results) => {
+        const failed = results.find((r) => r.status === "rejected");
+        if (failed) {
+          console.warn(
+            "Failed to broadcast scene parts:",
+            (failed as PromiseRejectedResult).reason
+          );
+        }
+      });
     },
     []
   );
@@ -267,11 +345,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       refreshCollaborators();
     };
 
-    const handleSceneMessage = (message: Ably.Message) => {
-      const data = message.data as SceneMessage | undefined;
-      if (!data || !Array.isArray(data.elements)) return;
-
-      // Ignore echoes and stale scenes (older element revisions than ours).
+    const applyScene = (data: SceneMessage) => {
       const incomingVersion = getSceneVersion(data.elements);
       if (incomingVersion <= currentSceneVersionRef.current) return;
 
@@ -316,6 +390,46 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       if (appState.theme === "light" || appState.theme === "dark") {
         setEditorTheme(appState.theme);
       }
+    };
+
+    const handleSceneMessage = (message: Ably.Message) => {
+      const data = message.data as SceneMessage | undefined;
+      if (!data || !Array.isArray(data.elements)) return;
+
+      // A scene split across multiple messages: buffer the parts, then apply
+      // the assembled scene once every part has arrived.
+      if (data.chunk) {
+        const sender = message.clientId ?? "unknown";
+        const { index, total, nonce } = data.chunk;
+        let buffer = sceneChunksRef.current.get(sender);
+
+        if (!buffer || buffer.nonce !== nonce) {
+          buffer = { nonce, total, parts: new Map(), appState: undefined };
+          sceneChunksRef.current.set(sender, buffer);
+        }
+
+        buffer.parts.set(index, data.elements);
+        if (data.appState) buffer.appState = data.appState;
+
+        if (buffer.parts.size < total) return;
+
+        sceneChunksRef.current.delete(sender);
+
+        const assembled: ExcalidrawElement[] = [];
+        for (let i = 0; i < total; i++) {
+          const part = buffer.parts.get(i);
+          if (!part) return;
+          assembled.push(...part);
+        }
+
+        applyScene({
+          elements: assembled,
+          appState: buffer.appState ?? {},
+        });
+        return;
+      }
+
+      applyScene(data);
     };
 
     async function setupRealtime() {
@@ -387,6 +501,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       receivedSceneRef.current = false;
       lastSceneSignatureRef.current = null;
       pendingRemoteSceneRef.current = null;
+      sceneChunksRef.current.clear();
       myClientIdRef.current = null;
       myPresenceRef.current = null;
 
