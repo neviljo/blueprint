@@ -123,9 +123,15 @@ const COLLAB_COLORS: CollabColor[] = [
 /** How long to wait after a local change before publishing it to the channel. */
 const SCENE_BROADCAST_DELAY = 200;
 /** Minimum interval between pointer presence updates. */
-const POINTER_THROTTLE_MS = 150;
+const POINTER_THROTTLE_MS = 200;
 /** How often to re-broadcast the full scene as a safety net for dropped deltas. */
 const FULL_SCENE_RESYNC_MS = 20000;
+/** Minimum gap between full-scene (force) broadcasts to absorb reconnect bursts. */
+const FULL_PUBLISH_COALESCE_MS = 2000;
+/** Delay after reconnecting before re-broadcasting the full scene. */
+const RECONNECT_RESYNC_DELAY_MS = 1000;
+/** Delay before retrying a connection that entered the "failed" state. */
+const RECONNECT_DELAY_MS = 3000;
 
 function colorForUser(id: string): CollabColor {
   let hash = 0;
@@ -167,6 +173,10 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
   const lastPointerPublishRef = useRef(0);
   const broadcastedElementVersionsRef = useRef<Map<string, number>>(new Map());
   const resyncIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastFullPublishRef = useRef(0);
+  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectResyncTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const authFailedRef = useRef(false);
   const sceneChunksRef = useRef<
     Map<
       string,
@@ -249,6 +259,13 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
 
       let toSend: ExcalidrawElement[];
       if (force) {
+        // Coalesce full-scene broadcasts: reconnect/resync/join can otherwise
+        // fire several full publishes in quick succession and trip Ably's
+        // per-connection message rate limit.
+        const now = Date.now();
+        if (now - lastFullPublishRef.current < FULL_PUBLISH_COALESCE_MS) return;
+        lastFullPublishRef.current = now;
+
         toSend = [...elements];
         for (const element of toSend) {
           broadcasted.set(element.id, element.version);
@@ -522,7 +539,25 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
     };
 
     async function setupRealtime() {
+      authFailedRef.current = false;
       setCollabError(null);
+
+      // Re-establish the connection after it entered the terminal "failed"
+      // state (Ably only auto-reconnects from disconnected/suspended).
+      const scheduleReconnect = (target: Ably.Realtime) => {
+        if (disposed || reconnectTimeoutRef.current) return;
+        reconnectTimeoutRef.current = setTimeout(() => {
+          reconnectTimeoutRef.current = null;
+          if (disposed) return;
+          try {
+            target.connection.connect();
+          } catch (err) {
+            console.warn("Failed to reconnect to Ably:", err);
+          }
+        }, RECONNECT_DELAY_MS);
+      };
+
+      let client: Ably.Realtime | null = null;
       try {
         const session = await getCurrentSession();
         const userName =
@@ -530,14 +565,21 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         const userId = session.user?.id || "anonymous";
         const color = colorForUser(userId);
 
-        const client = new Ably.Realtime({
+        client = new Ably.Realtime({
           // Token is fetched from our authenticated backend, which verifies
           // the session cookie and scopes the token to this canvas only.
+          logLevel: 1,
           authCallback: (_data, callback) => {
             canvasApi
               .getAblyToken(canvasId)
-              .then((tokenRequest) => callback(null, tokenRequest))
-              .catch((error) => callback(error, null));
+              .then((tokenRequest) => {
+                authFailedRef.current = false;
+                callback(null, tokenRequest);
+              })
+              .catch((error) => {
+                authFailedRef.current = true;
+                callback(error, null);
+              });
           },
         });
 
@@ -555,15 +597,24 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
               if (disposed) return;
               setCollabStatus("live");
               setCollabError(null);
-              // Fresh connection (initial or after a drop) — resync peers and
-              // refresh the member list once the channel is available.
+              // Fresh connection (initial or after a drop) — refresh the
+              // member list and re-broadcast the full scene so peers catch
+              // up, slightly delayed so the SDK can reattach first. The
+              // publish is coalesced so rapid reconnects can't burst it.
               if (channelRef.current) {
                 refreshCollaborators();
-                publishScene(
-                  currentContentRef.current.elements,
-                  currentContentRef.current.appState,
-                  true
-                );
+                if (reconnectResyncTimeoutRef.current) {
+                  clearTimeout(reconnectResyncTimeoutRef.current);
+                }
+                reconnectResyncTimeoutRef.current = setTimeout(() => {
+                  reconnectResyncTimeoutRef.current = null;
+                  if (disposed) return;
+                  publishScene(
+                    currentContentRef.current.elements,
+                    currentContentRef.current.appState,
+                    true
+                  );
+                }, RECONNECT_RESYNC_DELAY_MS);
               }
               break;
             }
@@ -574,10 +625,17 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
               break;
             case "failed":
               if (disposed) return;
-              setCollabStatus("offline");
-              setCollabError(
-                "Live collaboration is unavailable. Check that ABLY_API_KEY is set with Publish/Subscribe/Presence capability."
-              );
+              if (authFailedRef.current) {
+                // Token minting failed — retrying won't help, surface it.
+                setCollabStatus("offline");
+                setCollabError(
+                  "Live collaboration is unavailable. Check that ABLY_API_KEY is set with Publish/Subscribe/Presence capability."
+                );
+              } else {
+                // Transient network failure — keep retrying in the background.
+                setCollabStatus("reconnecting");
+                if (client) scheduleReconnect(client);
+              }
               break;
             default:
               break;
@@ -627,10 +685,16 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
           error
         );
         if (!disposed) {
-          setCollabStatus("offline");
-          setCollabError(
-            "Live collaboration is unavailable. Check that ABLY_API_KEY is set with Publish/Subscribe/Presence capability."
-          );
+          if (authFailedRef.current) {
+            setCollabStatus("offline");
+            setCollabError(
+              "Live collaboration is unavailable. Check that ABLY_API_KEY is set with Publish/Subscribe/Presence capability."
+            );
+          } else if (client) {
+            // Transient failure — keep trying instead of giving up.
+            setCollabStatus("reconnecting");
+            scheduleReconnect(client);
+          }
         }
       }
     }
@@ -651,6 +715,14 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       if (resyncIntervalRef.current) {
         clearInterval(resyncIntervalRef.current);
         resyncIntervalRef.current = null;
+      }
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+      }
+      if (reconnectResyncTimeoutRef.current) {
+        clearTimeout(reconnectResyncTimeoutRef.current);
+        reconnectResyncTimeoutRef.current = null;
       }
 
       const channel = channelRef.current;
