@@ -188,6 +188,16 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
   const lastFullSnapshotVersionRef = useRef(-1);
   const lastDeltaSeqRef = useRef(0);
   const syncPollingRef = useRef(false);
+  const deltaPostingRef = useRef(false);
+  const pendingDeltaRef = useRef<{
+    elements: ExcalidrawElement[];
+    sceneVersion: number;
+    full: boolean;
+  } | null>(null);
+  const pointerPostingRef = useRef(false);
+  const pendingPointerRef = useRef<{
+    pointer: { x: number; y: number; tool: "pointer" | "laser" } | null;
+  } | null>(null);
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const myUserIdRef = useRef<string | null>(null);
   const presenceHeartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -252,6 +262,56 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
     });
   }, []);
 
+  // Single-flight delta POST queue: at most one request in flight, so rapid
+  // drawing on a slow network can't flood the connection. If more changes
+  // arrive while a post is pending, only the newest state is sent when the
+  // current post resolves (pending elements are merged, keeping the latest
+  // version of each, so no changed element is lost).
+  const enqueueDelta = useCallback(
+    (elements: readonly ExcalidrawElement[], sceneVersion: number, full: boolean) => {
+      function postOne(
+        els: ExcalidrawElement[],
+        sv: number,
+        isFull: boolean
+      ) {
+        deltaPostingRef.current = true;
+        canvasApi
+          .postDelta(canvasId, { elements: els, sceneVersion: sv, full: isFull })
+          .then((res) => {
+            if (res.seq > lastDeltaSeqRef.current) {
+              lastDeltaSeqRef.current = res.seq;
+            }
+          })
+          .catch((err) => console.warn("Failed to post sync delta:", err))
+          .finally(() => {
+            deltaPostingRef.current = false;
+            const pending = pendingDeltaRef.current;
+            pendingDeltaRef.current = null;
+            if (pending) {
+              postOne(pending.elements, pending.sceneVersion, pending.full);
+            }
+          });
+      }
+
+      if (deltaPostingRef.current) {
+        const prev = pendingDeltaRef.current;
+        const merged = new Map<string, ExcalidrawElement>();
+        if (prev) {
+          for (const el of prev.elements) merged.set(el.id, el);
+        }
+        for (const el of elements) merged.set(el.id, el);
+        pendingDeltaRef.current = {
+          elements: [...merged.values()],
+          sceneVersion,
+          full: full || (prev?.full ?? false),
+        };
+        return;
+      }
+      postOne([...elements], sceneVersion, full);
+    },
+    [canvasId]
+  );
+
   // Broadcast local changes. The delta is always POSTed to the HTTP sync log
   // (the reliable source of truth), and also published to Ably as a fast path
   // when the realtime connection is up. `force` sends the whole scene (e.g.
@@ -296,18 +356,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       }
 
       // HTTP sync log — works regardless of Ably connectivity.
-      canvasApi
-        .postDelta(canvasId, {
-          elements: toSend,
-          sceneVersion,
-          full: force,
-        })
-        .then((res) => {
-          if (res.seq > lastDeltaSeqRef.current) {
-            lastDeltaSeqRef.current = res.seq;
-          }
-        })
-        .catch((err) => console.warn("Failed to post sync delta:", err));
+      enqueueDelta(toSend, sceneVersion, force);
 
       // Ably fast path — only when connected.
       const channel = channelRef.current;
@@ -320,7 +369,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         });
       }
     },
-    [canvasId, publishMessage]
+    [publishMessage, enqueueDelta]
   );
 
   // Fetch initial canvas data from backend API
@@ -962,6 +1011,38 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
   // cursor (arrow + name). Always posts to the HTTP presence endpoint so it
   // reaches every peer regardless of connectivity; when the Ably channel is
   // connected it also updates Ably presence for smoother realtime delivery.
+  // Flush the latest pointer to the HTTP presence endpoint. Single-flight:
+  // at most one POST in flight, so rapid pointer movement on a slow network
+  // can't flood the connection — the newest position wins when it resolves.
+  const flushPointerPost = useCallback(() => {
+    function postOne(pointer: { x: number; y: number; tool: "pointer" | "laser" } | null) {
+      const presence = myPresenceRef.current;
+      if (!presence) return;
+      pointerPostingRef.current = true;
+      canvasApi
+        .postPresence(canvasId, {
+          name: presence.name,
+          color: presence.color,
+          pointer,
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          pointerPostingRef.current = false;
+          const pending = pendingPointerRef.current;
+          if (pending) {
+            pendingPointerRef.current = null;
+            postOne(pending.pointer);
+          }
+        });
+    }
+
+    if (pointerPostingRef.current) return;
+    const pending = pendingPointerRef.current;
+    if (!pending) return;
+    pendingPointerRef.current = null;
+    postOne(pending.pointer);
+  }, [canvasId]);
+
   const publishPointer = useCallback(
     (pointer: { x: number; y: number; tool: "pointer" | "laser" } | null) => {
       const presence = myPresenceRef.current;
@@ -970,20 +1051,17 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       const updated: PresenceData = { ...presence, pointer };
       myPresenceRef.current = updated;
 
-      canvasApi
-        .postPresence(canvasId, {
-          name: updated.name,
-          color: updated.color,
-          pointer,
-        })
-        .catch(() => undefined);
+      // Latest pointer is always recorded; flushPointerPost coalesces the
+      // actual POSTs so at most one is in flight at a time.
+      pendingPointerRef.current = { pointer };
+      flushPointerPost();
 
       const channel = channelRef.current;
       if (channel && connectionStateRef.current === "connected") {
         channel.presence.update(updated).catch(() => undefined);
       }
     },
-    [canvasId]
+    [flushPointerPost]
   );
 
   const handlePointerUpdate = useCallback(
