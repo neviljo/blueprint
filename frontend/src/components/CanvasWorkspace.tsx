@@ -127,6 +127,8 @@ const SCENE_BROADCAST_THROTTLE_MS = 250;
 const SCENE_BROADCAST_DELAY = 250;
 /** Minimum interval between pointer presence updates. */
 const POINTER_THROTTLE_MS = 200;
+/** How long after the pointer stops moving before the cursor is cleared. */
+const POINTER_IDLE_CLEAR_MS = 1500;
 /** How often to re-broadcast the full scene as a safety net for dropped deltas. */
 const FULL_SCENE_RESYNC_MS = 20000;
 /** How often to poll the HTTP sync log for remote scene changes. */
@@ -179,6 +181,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
   const receivedSceneRef = useRef(false);
   const pendingRemoteSceneRef = useRef<CanvasContent | null>(null);
   const lastPointerPublishRef = useRef(0);
+  const pointerIdleTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const broadcastedElementVersionsRef = useRef<Map<string, number>>(new Map());
   const resyncIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastFullPublishRef = useRef(0);
@@ -871,6 +874,10 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         clearTimeout(reconnectResyncTimeoutRef.current);
         reconnectResyncTimeoutRef.current = null;
       }
+      if (pointerIdleTimeoutRef.current) {
+        clearTimeout(pointerIdleTimeoutRef.current);
+        pointerIdleTimeoutRef.current = null;
+      }
 
       const channel = channelRef.current;
       const client = ablyClientRef.current;
@@ -954,26 +961,12 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
   // Stream pointer position to other members so they can render our live
   // cursor (arrow + name). Uses Ably presence when the realtime channel is
   // connected, and falls back to the HTTP presence endpoint otherwise.
-  const handlePointerUpdate = useCallback(
-    (payload: {
-      pointer: { x: number; y: number; tool: "pointer" | "laser" };
-      button: "down" | "up";
-    }) => {
-      const now = Date.now();
-      if (now - lastPointerPublishRef.current < POINTER_THROTTLE_MS) return;
-      lastPointerPublishRef.current = now;
-
+  const publishPointer = useCallback(
+    (pointer: { x: number; y: number; tool: "pointer" | "laser" } | null) => {
       const presence = myPresenceRef.current;
       if (!presence) return;
 
-      const updated: PresenceData = {
-        ...presence,
-        pointer: {
-          x: payload.pointer.x,
-          y: payload.pointer.y,
-          tool: payload.pointer.tool,
-        },
-      };
+      const updated: PresenceData = { ...presence, pointer };
       myPresenceRef.current = updated;
 
       const channel = channelRef.current;
@@ -985,12 +978,40 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
           .postPresence(canvasId, {
             name: updated.name,
             color: updated.color,
-            pointer: updated.pointer,
+            pointer,
           })
           .catch(() => undefined);
       }
     },
     [canvasId]
+  );
+
+  const handlePointerUpdate = useCallback(
+    (payload: {
+      pointer: { x: number; y: number; tool: "pointer" | "laser" };
+      button: "down" | "up";
+    }) => {
+      const now = Date.now();
+      if (now - lastPointerPublishRef.current < POINTER_THROTTLE_MS) return;
+      lastPointerPublishRef.current = now;
+
+      publishPointer({
+        x: payload.pointer.x,
+        y: payload.pointer.y,
+        tool: payload.pointer.tool,
+      });
+
+      // Clear the cursor after the pointer goes idle so it fades instead of
+      // freezing at the last position.
+      if (pointerIdleTimeoutRef.current) {
+        clearTimeout(pointerIdleTimeoutRef.current);
+      }
+      pointerIdleTimeoutRef.current = setTimeout(() => {
+        pointerIdleTimeoutRef.current = null;
+        publishPointer(null);
+      }, POINTER_IDLE_CLEAR_MS);
+    },
+    [publishPointer]
   );
 
   // Capture the Excalidraw imperative API (refs are unsupported since v0.17)
