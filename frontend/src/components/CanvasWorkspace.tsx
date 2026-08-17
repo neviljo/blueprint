@@ -325,6 +325,18 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
     [canvasId]
   );
 
+  // Realtime is only truly usable when the Ably CHANNEL is attached (not just
+  // the connection being "connected" — the channel can be suspended while the
+  // connection looks fine). Every realtime fast-path and every HTTP fallback
+  // gate on this so collab degrades gracefully instead of silently dying.
+  const isRealtimeActive = useCallback(
+    () =>
+      !!channelRef.current &&
+      channelRef.current.state === "attached" &&
+      connectionStateRef.current === "connected",
+    []
+  );
+
   // Broadcast local changes. The delta is always POSTed to the HTTP sync log
   // (the reliable source of truth), and also published to Ably as a fast path
   // when the realtime connection is up. `force` sends the whole scene (e.g.
@@ -369,16 +381,10 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       }
 
       const channel = channelRef.current;
-      // Only stream over Ably when both the connection and the channel are
-      // actually live — publishing into a suspended/detached channel just
-      // errors out and spams the console while the socket is flapping.
-      const isRealtimeConnected =
-        !!channel &&
-        channel.state === "attached" &&
-        connectionStateRef.current === "connected";
+      const isRealtimeConnected = isRealtimeActive();
 
       // Ably fast path — stream live scene deltas instantly over WebSockets
-      if (isRealtimeConnected) {
+      if (isRealtimeConnected && channel) {
         publishMessage(channel, {
           elements: toSend,
           appState: cleanAppState,
@@ -392,7 +398,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         enqueueDelta(toSend, sceneVersion, force);
       }
     },
-    [publishMessage, enqueueDelta]
+    [publishMessage, enqueueDelta, isRealtimeActive]
   );
 
   // Fetch initial canvas data from backend API
@@ -713,9 +719,11 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
     // the realtime (Ably) channel is disconnected.
     const pollSync = async () => {
       if (disposed || loadingRef.current || syncPollingRef.current) return;
-      // When Ably is connected, scene deltas stream via WebSockets instantly;
-      // skip making unnecessary HTTP GET requests.
-      if (connectionStateRef.current === "connected") return;
+      // Skip HTTP polling only when realtime is genuinely active (channel
+      // attached) — the connection can say "connected" while the channel is
+      // suspended, in which case Ably isn't delivering anything and we MUST
+      // keep polling the sync log or the canvas stops updating.
+      if (isRealtimeActive()) return;
 
       syncPollingRef.current = true;
       try {
@@ -895,6 +903,13 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
                   clearTimeout(reconnectTimeoutRef.current);
                   reconnectTimeoutRef.current = null;
                 }
+                // If the channel is still suspended/detached after reconnect,
+                // nudge it to attach immediately (the SDK auto-retries, but an
+                // explicit attach here usually recovers faster than waiting for
+                // the next channel retry timeout).
+                if (channelRef.current.state !== "attached") {
+                  channelRef.current.attach().catch(() => undefined);
+                }
                 refreshCollaborators();
                 if (reconnectResyncTimeoutRef.current) {
                   clearTimeout(reconnectResyncTimeoutRef.current);
@@ -1059,7 +1074,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       client?.connection.off();
       client?.close();
     };
-  }, [canvasId, publishScene, refreshCollaborators]);
+  }, [canvasId, publishScene, refreshCollaborators, isRealtimeActive, syncCollaboratorsToSceneAndState]);
 
   // Save content to backend API
   const saveCanvasContent = useCallback(
@@ -1170,16 +1185,18 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       myPresenceRef.current = updated;
 
       const channel = channelRef.current;
-      if (channel && connectionStateRef.current === "connected") {
+      if (channel && isRealtimeActive()) {
         // Fast path: stream pointer directly over Ably WebSocket
         channel.presence.update(updated).catch(() => undefined);
       } else {
-        // Fallback: flush over HTTP presence only when realtime is disconnected
+        // Fallback: flush over HTTP presence when the Ably channel isn't
+        // attached (connection "connected" but channel suspended still lands
+        // here, so cursors keep flowing over HTTP instead of dying silently).
         pendingPointerRef.current = { pointer };
         flushPointerPost();
       }
     },
-    [flushPointerPost]
+    [flushPointerPost, isRealtimeActive]
   );
 
   const handlePointerUpdate = useCallback(
