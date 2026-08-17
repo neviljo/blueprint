@@ -43,4 +43,10 @@ app.get("/health", (c) => {
   });
 });
 
+app.get("/api/health", (c) => {
+  return c.json({
+    success: true,
+  });
+});
+
 export default app;

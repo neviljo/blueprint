@@ -369,7 +369,13 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       }
 
       const channel = channelRef.current;
-      const isRealtimeConnected = channel && connectionStateRef.current === "connected";
+      // Only stream over Ably when both the connection and the channel are
+      // actually live — publishing into a suspended/detached channel just
+      // errors out and spams the console while the socket is flapping.
+      const isRealtimeConnected =
+        !!channel &&
+        channel.state === "attached" &&
+        connectionStateRef.current === "connected";
 
       // Ably fast path — stream live scene deltas instantly over WebSockets
       if (isRealtimeConnected) {
@@ -479,6 +485,17 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
     const channel = channelRef.current;
     const myClientId = myClientIdRef.current;
     if (!channel) return;
+
+    // Don't trigger a presence.get() when the channel is suspended/detached —
+    // it would hang on a 15s attach timeout that never completes while the
+    // socket is flapping. The HTTP presence fallback still covers this.
+    if (
+      channel.state === "suspended" ||
+      channel.state === "failed" ||
+      channel.state === "detached"
+    ) {
+      return;
+    }
 
     try {
       const members = await channel.presence.get();
@@ -790,6 +807,17 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         reconnectTimeoutRef.current = setTimeout(() => {
           reconnectTimeoutRef.current = null;
           if (disposed) return;
+          // The SDK auto-reconnects from disconnected/suspended; only force a
+          // reconnect if we're actually still stuck in a terminal state.
+          const state = connectionStateRef.current;
+          if (
+            state === "connected" ||
+            state === "connecting" ||
+            state === "closing" ||
+            state === "closed"
+          ) {
+            return;
+          }
           try {
             target.connection.connect();
           } catch (err) {
@@ -811,7 +839,10 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         client = new Ably.Realtime({
           // Token is fetched from our authenticated backend, which verifies
           // the session cookie and scopes the token to this canvas only.
+          // echoMessages is off so our own broadcasts aren't re-delivered
+          // and re-processed on flaky connections.
           logLevel: 1,
+          echoMessages: false,
           authCallback: (_data, callback) => {
             canvasApi
               .getAblyToken(canvasId)
@@ -849,6 +880,12 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
               // up, slightly delayed so the SDK can reattach first. The
               // publish is coalesced so rapid reconnects can't burst it.
               if (channelRef.current) {
+                // Cancel any pending manual reconnect so a stale timer can't
+                // force the socket down right after a successful reconnect.
+                if (reconnectTimeoutRef.current) {
+                  clearTimeout(reconnectTimeoutRef.current);
+                  reconnectTimeoutRef.current = null;
+                }
                 refreshCollaborators();
                 if (reconnectResyncTimeoutRef.current) {
                   clearTimeout(reconnectResyncTimeoutRef.current);
