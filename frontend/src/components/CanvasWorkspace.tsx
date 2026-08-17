@@ -1,10 +1,10 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { Box, IconButton, Tooltip, CircularProgress } from "@mui/material";
+import { Box, IconButton, Tooltip, CircularProgress, Avatar, AvatarGroup, Typography, Divider } from "@mui/material";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import LightModeIcon from "@mui/icons-material/LightMode";
 import DarkModeIcon from "@mui/icons-material/DarkMode";
 import Ably from "ably";
-import { Excalidraw, CaptureUpdateAction, getSceneVersion } from "@excalidraw/excalidraw";
+import { Excalidraw, CaptureUpdateAction, getSceneVersion, UserIdleState } from "@excalidraw/excalidraw";
 import type {
   AppState,
   Collaborator,
@@ -125,8 +125,8 @@ const COLLAB_COLORS: CollabColor[] = [
 const SCENE_BROADCAST_THROTTLE_MS = 100;
 /** How long to wait after the last change before a final trailing broadcast. */
 const SCENE_BROADCAST_DELAY = 250;
-/** Minimum interval between pointer presence updates. */
-const POINTER_THROTTLE_MS = 200;
+/** Minimum interval between pointer presence updates (50ms = 20fps smooth stream). */
+const POINTER_THROTTLE_MS = 50;
 /** How long after the pointer stops moving before the cursor is cleared. */
 const POINTER_IDLE_CLEAR_MS = 1500;
 /** How often to re-broadcast the full scene as a safety net for dropped deltas. */
@@ -217,6 +217,19 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       }
     >
   >(new Map());
+
+  const collaboratorsRef = useRef<Map<SocketId, Collaborator>>(new Map());
+  const [collaboratorsList, setCollaboratorsList] = useState<Collaborator[]>([]);
+  const [currentUserInfo, setCurrentUserInfo] = useState<{ name: string; color: CollabColor }>({
+    name: "You",
+    color: COLLAB_COLORS[0],
+  });
+
+  const syncCollaboratorsToSceneAndState = useCallback(() => {
+    const nextMap = new Map(collaboratorsRef.current);
+    excalidrawRef.current?.updateScene({ collaborators: nextMap });
+    setCollaboratorsList(Array.from(collaboratorsRef.current.values()));
+  }, []);
 
   // Publishes a scene message, splitting it into chunked parts if it exceeds
   // the per-message byte budget.
@@ -465,7 +478,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
 
     try {
       const members = await channel.presence.get();
-      const collaborators = new Map<SocketId, Collaborator>();
+      collaboratorsRef.current.clear();
 
       for (const member of members) {
         if (member.clientId === myClientId) continue;
@@ -473,31 +486,76 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         const data = member.data as PresenceData | undefined;
         if (!data?.name) continue;
 
-        collaborators.set(member.clientId as SocketId, {
+        collaboratorsRef.current.set(member.clientId as SocketId, {
           id: member.clientId,
+          socketId: member.clientId as SocketId,
           username: data.name,
-          color: data.color,
+          color: {
+            background: data.color?.background || "#f472b6",
+            stroke: data.color?.stroke || "#9d174d",
+          },
           pointer: data.pointer
-            ? { x: data.pointer.x, y: data.pointer.y, tool: data.pointer.tool }
+            ? {
+                x: data.pointer.x,
+                y: data.pointer.y,
+                tool: data.pointer.tool || "pointer",
+                renderCursor: true,
+              }
             : undefined,
+          userState: UserIdleState.ACTIVE,
+          button: "up",
         });
       }
 
-      excalidrawRef.current?.updateScene({ collaborators });
+      syncCollaboratorsToSceneAndState();
     } catch (err) {
       console.warn("Failed to refresh collaborators:", err);
     }
-  }, []);
+  }, [syncCollaboratorsToSceneAndState]);
 
   // Set up the Ably realtime connection: presence for live cursors and a
   // channel for scene synchronization between members of the workspace.
   useEffect(() => {
     let disposed = false;
 
+    const handlePresenceMessage = (member: Ably.PresenceMessage) => {
+      if (member.clientId === myClientIdRef.current) return;
+
+      const socketId = member.clientId as SocketId;
+      if (member.action === "leave" || member.action === "absent") {
+        collaboratorsRef.current.delete(socketId);
+      } else {
+        const data = member.data as PresenceData | undefined;
+        if (data?.name) {
+          collaboratorsRef.current.set(socketId, {
+            id: member.clientId,
+            socketId,
+            username: data.name,
+            color: {
+              background: data.color?.background || "#f472b6",
+              stroke: data.color?.stroke || "#9d174d",
+            },
+            pointer: data.pointer
+              ? {
+                  x: data.pointer.x,
+                  y: data.pointer.y,
+                  tool: data.pointer.tool || "pointer",
+                  renderCursor: true,
+                }
+              : undefined,
+            userState: UserIdleState.ACTIVE,
+            button: "up",
+          });
+        }
+      }
+
+      syncCollaboratorsToSceneAndState();
+    };
+
     const handlePresenceJoin = (member: Ably.PresenceMessage) => {
       if (member.clientId === myClientIdRef.current) return;
 
-      refreshCollaborators();
+      handlePresenceMessage(member);
       // Share our in-memory scene (fresher than what the DB may have) so the
       // new member catches up immediately. Receivers ignore stale scenes via
       // the scene-version guard, so broadcasting is safe even if we are not
@@ -509,8 +567,8 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       );
     };
 
-    const handlePresenceChange = () => {
-      refreshCollaborators();
+    const handlePresenceChange = (member: Ably.PresenceMessage) => {
+      handlePresenceMessage(member);
     };
 
     const applyScene = (data: SceneMessage) => {
@@ -572,6 +630,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
             appState.viewBackgroundColor ??
             (appState.theme === "light" ? "#ffffff" : "#121212"),
         },
+        collaborators: new Map(collaboratorsRef.current),
         captureUpdate: CaptureUpdateAction.NEVER,
       });
 
@@ -681,31 +740,36 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       members: PresenceMember[]
     ) => {
       if (disposed) return;
-      // Always populate the collaborators map from HTTP presence so avatars
-      // and cursors render in every connectivity mix. When Ably is connected,
-      // its presence events call refreshCollaborators which overrides this
-      // with the smoother realtime pointers.
-
-      const collaborators = new Map<SocketId, Collaborator>();
 
       for (const member of members) {
         if (member.userId === myUserIdRef.current) continue;
 
-        collaborators.set(member.userId as SocketId, {
-          id: member.userId,
-          username: member.name,
-          color: member.color,
-          pointer: member.pointer
-            ? {
-                x: member.pointer.x,
-                y: member.pointer.y,
-                tool: member.pointer.tool,
-              }
-            : undefined,
-        });
+        const socketId = member.userId as SocketId;
+        // Don't overwrite active Ably presence data if already stored
+        if (!collaboratorsRef.current.has(socketId)) {
+          collaboratorsRef.current.set(socketId, {
+            id: member.userId,
+            socketId,
+            username: member.name,
+            color: {
+              background: member.color?.background || "#f472b6",
+              stroke: member.color?.stroke || "#9d174d",
+            },
+            pointer: member.pointer
+              ? {
+                  x: member.pointer.x,
+                  y: member.pointer.y,
+                  tool: member.pointer.tool || "pointer",
+                  renderCursor: true,
+                }
+              : undefined,
+            userState: UserIdleState.ACTIVE,
+            button: "up",
+          });
+        }
       }
 
-      excalidrawRef.current?.updateScene({ collaborators });
+      syncCollaboratorsToSceneAndState();
     };
 
     async function setupRealtime() {
@@ -757,6 +821,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
 
         ablyClientRef.current = client;
         myPresenceRef.current = { name: userName, color, pointer: null };
+        setCurrentUserInfo({ name: userName, color });
         // Send our initial HTTP presence heartbeat right away so peers see us
         // (and our avatar) even before any realtime connection is established.
         sendPresenceHeartbeat();
@@ -1213,46 +1278,117 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         </Box>
       )}
 
-      {/* Live collaboration status indicator */}
+      {/* Online Participants Stack & Realtime Collaboration Indicator */}
       {!collabError && (isCollaborating || collabStatus === "connecting") && (
         <Box
           sx={{
             position: "absolute",
-            top: 16,
+            top: 14,
             right: 16,
             zIndex: 10,
             display: "flex",
             alignItems: "center",
-            gap: 0.75,
-            color: "#A6A6A6",
-            bgcolor: "rgba(18, 18, 18, 0.9)",
-            border: "1px solid #1f1f1f",
-            borderRadius: 1,
-            px: 1.25,
-            py: 0.5,
-            fontSize: "0.75rem",
+            gap: 1.5,
+            bgcolor: "rgba(18, 18, 18, 0.85)",
+            backdropFilter: "blur(8px)",
+            border: "1px solid rgba(255, 255, 255, 0.12)",
+            borderRadius: "24px",
+            px: 2,
+            py: 0.75,
+            boxShadow: "0 4px 20px rgba(0,0,0,0.4)",
           }}
         >
-          <Box
+          {/* Status indicator pill */}
+          <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+            <Box
+              sx={{
+                width: 8,
+                height: 8,
+                borderRadius: "50%",
+                bgcolor:
+                  collabStatus === "live"
+                    ? "#34d399"
+                    : collabStatus === "reconnecting"
+                      ? "#fbbf24"
+                      : "#f87171",
+                boxShadow:
+                  collabStatus === "live"
+                    ? "0 0 8px #34d399"
+                    : "none",
+              }}
+            />
+            <Typography variant="caption" sx={{ color: "#ECECEC", fontWeight: 600, fontSize: "0.75rem" }}>
+              {collabStatus === "live"
+                ? `${collaboratorsList.length + 1} Online`
+                : collabStatus === "reconnecting"
+                  ? "Reconnecting…"
+                  : "Connecting…"}
+            </Typography>
+          </Box>
+
+          <Divider orientation="vertical" flexItem sx={{ borderColor: "rgba(255,255,255,0.15)", my: 0.25 }} />
+
+          {/* Active Collaborators Avatars */}
+          <AvatarGroup
+            max={5}
             sx={{
-              width: 8,
-              height: 8,
-              borderRadius: "50%",
-              bgcolor:
-                collabStatus === "live"
-                  ? "#34d399"
-                  : collabStatus === "reconnecting"
-                    ? "#fbbf24"
-                    : "#f87171",
+              "& .MuiAvatar-root": {
+                width: 28,
+                height: 28,
+                fontSize: "0.75rem",
+                fontWeight: 700,
+                border: "2px solid #121212",
+              },
             }}
-          />
-          {collabStatus === "live"
-            ? "Live"
-            : collabStatus === "reconnecting"
-              ? "Reconnecting…"
-              : collabStatus === "connecting"
-                ? "Connecting…"
-                : "Offline"}
+          >
+            {/* Self Avatar */}
+            <Tooltip title={`${currentUserInfo.name} (You)`} arrow placement="bottom">
+              <Avatar
+                sx={{
+                  bgcolor: currentUserInfo.color.background,
+                  color: "#ffffff",
+                  outline: `2px solid ${currentUserInfo.color.stroke}`,
+                }}
+              >
+                {(currentUserInfo.name || "U").charAt(0).toUpperCase()}
+              </Avatar>
+            </Tooltip>
+
+            {/* Remote Collaborators Avatars */}
+            {collaboratorsList.map((collab) => (
+              <Tooltip
+                key={collab.id || collab.username}
+                title={
+                  <Box sx={{ p: 0.25 }}>
+                    <Typography variant="subtitle2" sx={{ fontWeight: 700, fontSize: "0.8rem" }}>
+                      {collab.username}
+                    </Typography>
+                    <Typography variant="caption" sx={{ color: "#a1a1aa", fontSize: "0.7rem", display: "block" }}>
+                      {collab.pointer ? "Active on canvas" : "Online"}
+                    </Typography>
+                  </Box>
+                }
+                arrow
+                placement="bottom"
+              >
+                <Avatar
+                  sx={{
+                    bgcolor: collab.color?.background || "#a78bfa",
+                    color: "#ffffff",
+                    outline: `2px solid ${collab.color?.stroke || "#5b21b6"}`,
+                    cursor: "pointer",
+                    transition: "transform 0.15s ease",
+                    "&:hover": {
+                      transform: "scale(1.15)",
+                      zIndex: 100,
+                    },
+                  }}
+                >
+                  {(collab.username || "A").charAt(0).toUpperCase()}
+                </Avatar>
+              </Tooltip>
+            ))}
+          </AvatarGroup>
         </Box>
       )}
 
