@@ -125,14 +125,14 @@ const COLLAB_COLORS: CollabColor[] = [
 const SCENE_BROADCAST_THROTTLE_MS = 100;
 /** How long to wait after the last change before a final trailing broadcast. */
 const SCENE_BROADCAST_DELAY = 250;
-/** Minimum interval between pointer presence updates (50ms = 20fps smooth stream). */
-const POINTER_THROTTLE_MS = 50;
+/** Minimum interval between pointer presence updates (80ms = 12.5fps smooth WebSocket stream). */
+const POINTER_THROTTLE_MS = 80;
 /** How long after the pointer stops moving before the cursor is cleared. */
 const POINTER_IDLE_CLEAR_MS = 1500;
 /** How often to re-broadcast the full scene as a safety net for dropped deltas. */
 const FULL_SCENE_RESYNC_MS = 20000;
-/** How often to poll the HTTP sync log for remote scene changes. */
-const SCENE_POLL_MS = 300;
+/** How often to poll the HTTP sync log for remote scene changes when realtime is offline. */
+const SCENE_POLL_MS = 2500;
 /** How often to send an HTTP presence heartbeat (keeps us marked online). */
 const PRESENCE_HEARTBEAT_MS = 10000;
 /** Minimum gap between full-scene (force) broadcasts to absorb reconnect bursts. */
@@ -368,18 +368,22 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         }
       }
 
-      // HTTP sync log — works regardless of Ably connectivity.
-      enqueueDelta(toSend, sceneVersion, force);
-
-      // Ably fast path — only when connected.
       const channel = channelRef.current;
-      if (channel && connectionStateRef.current === "connected") {
+      const isRealtimeConnected = channel && connectionStateRef.current === "connected";
+
+      // Ably fast path — stream live scene deltas instantly over WebSockets
+      if (isRealtimeConnected) {
         publishMessage(channel, {
           elements: toSend,
           appState: cleanAppState,
           sceneVersion,
           full: force,
         });
+      }
+
+      // HTTP sync log — persistence fallback when realtime is offline or on full snapshot resync
+      if (!isRealtimeConnected || force) {
+        enqueueDelta(toSend, sceneVersion, force);
       }
     },
     [publishMessage, enqueueDelta]
@@ -688,11 +692,14 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       applyScene(data);
     };
 
-    // Poll the HTTP sync log for remote scene changes. This is the reliable
-    // path that works even when the realtime channel is unreachable. Deltas
-    // are fed through the same version-guarded merge as Ably messages.
+    // Poll the HTTP sync log for remote scene changes. Used as a fallback when
+    // the realtime (Ably) channel is disconnected.
     const pollSync = async () => {
       if (disposed || loadingRef.current || syncPollingRef.current) return;
+      // When Ably is connected, scene deltas stream via WebSockets instantly;
+      // skip making unnecessary HTTP GET requests.
+      if (connectionStateRef.current === "connected") return;
+
       syncPollingRef.current = true;
       try {
         const result = await canvasApi.getDeltas(
@@ -1116,14 +1123,14 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       const updated: PresenceData = { ...presence, pointer };
       myPresenceRef.current = updated;
 
-      // Latest pointer is always recorded; flushPointerPost coalesces the
-      // actual POSTs so at most one is in flight at a time.
-      pendingPointerRef.current = { pointer };
-      flushPointerPost();
-
       const channel = channelRef.current;
       if (channel && connectionStateRef.current === "connected") {
+        // Fast path: stream pointer directly over Ably WebSocket
         channel.presence.update(updated).catch(() => undefined);
+      } else {
+        // Fallback: flush over HTTP presence only when realtime is disconnected
+        pendingPointerRef.current = { pointer };
+        flushPointerPost();
       }
     },
     [flushPointerPost]
