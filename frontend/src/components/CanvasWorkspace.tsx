@@ -843,6 +843,15 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
           // and re-processed on flaky connections.
           logLevel: 1,
           echoMessages: false,
+          // Ably drops connections for operational reasons (autoscaling,
+          // rebalancing, deployments) on every plan. The SDK defaults wait
+          // 15-30s before reconnecting, which makes realtime feel dead after a
+          // drop. Retry fast instead, and enable connection-state recovery so
+          // drops resume with message continuity instead of losing the stream.
+          disconnectedRetryTimeout: 1500,
+          suspendedRetryTimeout: 10000,
+          closeOnUnload: false,
+          recover: (_details, callback) => callback(true),
           authCallback: (_data, callback) => {
             canvasApi
               .getAblyToken(canvasId)
