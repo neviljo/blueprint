@@ -137,11 +137,6 @@ const SCENE_POLL_MS = 2500;
 const PRESENCE_HEARTBEAT_MS = 10000;
 /** Minimum gap between full-scene (force) broadcasts to absorb reconnect bursts. */
 const FULL_PUBLISH_COALESCE_MS = 2000;
-/** Delay after reconnecting before re-broadcasting the full scene. */
-const RECONNECT_RESYNC_DELAY_MS = 1000;
-/** Delay before retrying a connection that entered the "failed" state. */
-const RECONNECT_DELAY_MS = 3000;
-
 function colorForUser(id: string): CollabColor {
   let hash = 0;
   for (let i = 0; i < id.length; i++) {
@@ -201,9 +196,17 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const myUserIdRef = useRef<string | null>(null);
   const presenceHeartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const reconnectResyncTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const authFailedRef = useRef(false);
+  const isOnlineRef = useRef(typeof navigator !== "undefined" ? navigator.onLine : true);
+  const pendingSaveRef = useRef<{
+    elements: ExcalidrawElement[];
+    appState: Partial<AppState>;
+  } | null>(null);
+  const saveRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const saveRetryCountRef = useRef(0);
+  const saveCanvasContentRef = useRef<
+    (elements: ExcalidrawElement[], appState: Partial<AppState>) => Promise<void>
+  >(async () => {});
   const sceneChunksRef = useRef<
     Map<
       string,
@@ -287,6 +290,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         sv: number,
         isFull: boolean
       ) {
+        if (!isOnlineRef.current || document.hidden) return;
         deltaPostingRef.current = true;
         canvasApi
           .postDelta(canvasId, { elements: els, sceneVersion: sv, full: isFull })
@@ -540,10 +544,117 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
     }
   }, [syncCollaboratorsToSceneAndState]);
 
+  // Save content to backend API. On failure, the newest state is queued and
+  // retried with exponential backoff so the latest canvas content always
+  // reaches the backend once the network recovers.
+  const saveCanvasContent = useCallback(
+    async (elements: ExcalidrawElement[], appState: Partial<AppState>) => {
+      const cleanAppState: Partial<AppState> = { ...appState };
+      delete cleanAppState.collaborators;
+
+      try {
+        await canvasApi.updateContent(
+          canvasId,
+          JSON.stringify({
+            elements,
+            appState: cleanAppState,
+          })
+        );
+        // Save succeeded — clear any queued retry state.
+        pendingSaveRef.current = null;
+        saveRetryCountRef.current = 0;
+        if (saveRetryTimerRef.current) {
+          clearTimeout(saveRetryTimerRef.current);
+          saveRetryTimerRef.current = null;
+        }
+      } catch (err) {
+        console.warn("Failed to save canvas content to backend:", err);
+        // Keep the newest unsaved state and retry with exponential backoff.
+        pendingSaveRef.current = { elements: [...elements], appState: cleanAppState };
+        if (!saveRetryTimerRef.current) {
+          const attempt = saveRetryCountRef.current++;
+          const delay = Math.min(2000 * 2 ** attempt, 30000);
+          saveRetryTimerRef.current = setTimeout(() => {
+            saveRetryTimerRef.current = null;
+            const pending = pendingSaveRef.current;
+            if (pending) {
+              saveCanvasContentRef.current(pending.elements, pending.appState);
+            } else {
+              saveRetryCountRef.current = 0;
+            }
+          }, delay);
+        }
+      }
+    },
+    [canvasId]
+  );
+
+  // Immediately push any queued (unsaved) content once the network is back or
+  // the tab becomes visible again.
+  const flushPendingSave = useCallback(() => {
+    if (saveRetryTimerRef.current) {
+      clearTimeout(saveRetryTimerRef.current);
+      saveRetryTimerRef.current = null;
+    }
+    saveRetryCountRef.current = 0;
+    const pending = pendingSaveRef.current;
+    if (pending) {
+      pendingSaveRef.current = null;
+      saveCanvasContent(pending.elements, pending.appState);
+    }
+  }, [saveCanvasContent]);
+
+  // The Ably effect must never re-run because a callback identity changed, or
+  // React will tear down and recreate the connection. All callbacks the effect
+  // needs are held in refs and read through `.current`, so the effect's only
+  // dependency is canvasId itself.
+  const publishSceneRef = useRef(publishScene);
+  const refreshCollaboratorsRef = useRef(refreshCollaborators);
+  const isRealtimeActiveRef = useRef(isRealtimeActive);
+  const syncCollaboratorsToSceneAndStateRef = useRef(syncCollaboratorsToSceneAndState);
+  const flushPendingSaveRef = useRef(flushPendingSave);
+
   // Set up the Ably realtime connection: presence for live cursors and a
   // channel for scene synchronization between members of the workspace.
+  // The effect depends ONLY on canvasId — every realtime callback is accessed
+  // through a ref (see above) so React re-renders can never tear down and
+  // recreate the connection.
   useEffect(() => {
     let disposed = false;
+    console.log(`[ABLY] effect setup (canvasId=${canvasId})`);
+
+    // Keep the callback refs pointed at the latest identity. These only change
+    // when canvasId changes (which re-runs this effect), so assigning here is
+    // always in sync with the closure below.
+    publishSceneRef.current = publishScene;
+    refreshCollaboratorsRef.current = refreshCollaborators;
+    isRealtimeActiveRef.current = isRealtimeActive;
+    syncCollaboratorsToSceneAndStateRef.current = syncCollaboratorsToSceneAndState;
+    flushPendingSaveRef.current = flushPendingSave;
+    saveCanvasContentRef.current = saveCanvasContent;
+
+    // Track network connectivity and tab visibility so we can pause HTTP
+    // fallback traffic (polls/heartbeats/saves) while the connection is dead
+    // and flush anything queued the moment it recovers.
+    isOnlineRef.current = navigator.onLine;
+    const handleOnline = () => {
+      isOnlineRef.current = true;
+      setCollabStatus((prev) => (prev === "offline" ? "reconnecting" : prev));
+      flushPendingSaveRef.current();
+    };
+    const handleOffline = () => {
+      isOnlineRef.current = false;
+    };
+    const handleVisibilityChange = () => {
+      if (document.hidden) return;
+      // Tab visible again — push anything we paused while hidden.
+      flushPendingSaveRef.current();
+      pollSync();
+      sendPresenceHeartbeat();
+    };
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
 
     const handlePresenceMessage = (member: Ably.PresenceMessage) => {
       if (member.clientId === myClientIdRef.current) return;
@@ -576,7 +687,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         }
       }
 
-      syncCollaboratorsToSceneAndState();
+      syncCollaboratorsToSceneAndStateRef.current();
     };
 
     const handlePresenceJoin = (member: Ably.PresenceMessage) => {
@@ -587,7 +698,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       // new member catches up immediately. Receivers ignore stale scenes via
       // the scene-version guard, so broadcasting is safe even if we are not
       // fully synced yet.
-      publishScene(
+      publishSceneRef.current(
         currentContentRef.current.elements,
         currentContentRef.current.appState,
         true
@@ -719,11 +830,14 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
     // the realtime (Ably) channel is disconnected.
     const pollSync = async () => {
       if (disposed || loadingRef.current || syncPollingRef.current) return;
+      // Don't hammer a dead connection while the network is down or the tab
+      // is hidden — poll again as soon as we're online/visible.
+      if (!isOnlineRef.current || document.hidden) return;
       // Skip HTTP polling only when realtime is genuinely active (channel
       // attached) — the connection can say "connected" while the channel is
       // suspended, in which case Ably isn't delivering anything and we MUST
       // keep polling the sync log or the canvas stops updating.
-      if (isRealtimeActive()) return;
+      if (isRealtimeActiveRef.current()) return;
 
       syncPollingRef.current = true;
       try {
@@ -755,6 +869,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
     // avatars and cursors appear even when the realtime channel is unreachable.
     const sendPresenceHeartbeat = async () => {
       if (disposed) return;
+      if (!isOnlineRef.current || document.hidden) return;
       const info = myPresenceRef.current;
       if (!info) return;
       try {
@@ -801,40 +916,13 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         }
       }
 
-      syncCollaboratorsToSceneAndState();
+      syncCollaboratorsToSceneAndStateRef.current();
     };
 
     async function setupRealtime() {
       authFailedRef.current = false;
       setCollabError(null);
 
-      // Re-establish the connection after it entered the terminal "failed"
-      // state (Ably only auto-reconnects from disconnected/suspended).
-      const scheduleReconnect = (target: Ably.Realtime) => {
-        if (disposed || reconnectTimeoutRef.current) return;
-        reconnectTimeoutRef.current = setTimeout(() => {
-          reconnectTimeoutRef.current = null;
-          if (disposed) return;
-          // The SDK auto-reconnects from disconnected/suspended; only force a
-          // reconnect if we're actually still stuck in a terminal state.
-          const state = connectionStateRef.current;
-          if (
-            state === "connected" ||
-            state === "connecting" ||
-            state === "closing" ||
-            state === "closed"
-          ) {
-            return;
-          }
-          try {
-            target.connection.connect();
-          } catch (err) {
-            console.warn("Failed to reconnect to Ably:", err);
-          }
-        }, RECONNECT_DELAY_MS);
-      };
-
-      let client: Ably.Realtime | null = null;
       try {
         const session = await getCurrentSession();
         const userName =
@@ -844,22 +932,20 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
 
         myUserIdRef.current = userId;
 
-        client = new Ably.Realtime({
+        // The component may have unmounted (or StrictMode re-ran the effect)
+        // while we were fetching the session. Bail out before creating a client
+        // so we never connect-then-close in the first place.
+        if (disposed) return;
+
+        console.log(`[ABLY] creating Realtime client (canvasId=${canvasId})`);
+        const client = new Ably.Realtime({
           // Token is fetched from our authenticated backend, which verifies
           // the session cookie and scopes the token to this canvas only.
           // echoMessages is off so our own broadcasts aren't re-delivered
-          // and re-processed on flaky connections.
+          // and re-processed on flaky connections. Reconnect behavior is left
+          // entirely to the SDK — no manual connect(), no custom recovery.
           logLevel: 1,
           echoMessages: false,
-          // Ably drops connections for operational reasons (autoscaling,
-          // rebalancing, deployments) on every plan. The SDK defaults wait
-          // 15-30s before reconnecting, which makes realtime feel dead after a
-          // drop. Retry fast instead, and enable connection-state recovery so
-          // drops resume with message continuity instead of losing the stream.
-          disconnectedRetryTimeout: 1500,
-          suspendedRetryTimeout: 10000,
-          closeOnUnload: false,
-          recover: (_details, callback) => callback(true),
           authCallback: (_data, callback) => {
             canvasApi
               .getAblyToken(canvasId)
@@ -881,48 +967,27 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         // (and our avatar) even before any realtime connection is established.
         sendPresenceHeartbeat();
 
-        // Track connection state so we never publish into a dead socket, and
-        // so peers resync automatically after a drop / reconnect.
+        // Track connection state so we never publish into a dead socket.
+        // Ably manages the reconnect cycle on its own; we only observe it.
         client.connection.on((stateChange) => {
           const state = stateChange.current;
+          const previous = stateChange.previous;
           connectionStateRef.current = state;
+          console.log(
+            `[ABLY] connection state: ${previous} -> ${state}`,
+            stateChange.reason ?? ""
+          );
 
           switch (state) {
             case "connected": {
               if (disposed) return;
               setCollabStatus("live");
               setCollabError(null);
-              // Fresh connection (initial or after a drop) — refresh the
-              // member list and re-broadcast the full scene so peers catch
-              // up, slightly delayed so the SDK can reattach first. The
-              // publish is coalesced so rapid reconnects can't burst it.
+              // Fresh connection (initial or after an Ably-managed reconnect)
+              // — refresh the member list so new peers appear. The channel
+              // reattaches on its own; no need to force it.
               if (channelRef.current) {
-                // Cancel any pending manual reconnect so a stale timer can't
-                // force the socket down right after a successful reconnect.
-                if (reconnectTimeoutRef.current) {
-                  clearTimeout(reconnectTimeoutRef.current);
-                  reconnectTimeoutRef.current = null;
-                }
-                // If the channel is still suspended/detached after reconnect,
-                // nudge it to attach immediately (the SDK auto-retries, but an
-                // explicit attach here usually recovers faster than waiting for
-                // the next channel retry timeout).
-                if (channelRef.current.state !== "attached") {
-                  channelRef.current.attach().catch(() => undefined);
-                }
-                refreshCollaborators();
-                if (reconnectResyncTimeoutRef.current) {
-                  clearTimeout(reconnectResyncTimeoutRef.current);
-                }
-                reconnectResyncTimeoutRef.current = setTimeout(() => {
-                  reconnectResyncTimeoutRef.current = null;
-                  if (disposed) return;
-                  publishScene(
-                    currentContentRef.current.elements,
-                    currentContentRef.current.appState,
-                    true
-                  );
-                }, RECONNECT_RESYNC_DELAY_MS);
+                refreshCollaboratorsRef.current();
               }
               break;
             }
@@ -940,23 +1005,25 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
                   "Live cursors are unavailable (realtime connection failed). Scene changes still sync automatically."
                 );
               } else {
-                // Transient network failure — keep retrying in the background.
-                setCollabStatus("reconnecting");
-                if (client) scheduleReconnect(client);
+                // Ably does not auto-reconnect from "failed"; surface it and
+                // let a fresh mount re-establish the connection. HTTP delta
+                // sync keeps the canvas consistent in the meantime.
+                setCollabStatus("offline");
               }
               break;
             default:
               break;
-          }
-
-          if (stateChange.reason && state !== "connected") {
-            console.warn("Ably connection state change:", state, stateChange.reason);
           }
         });
 
         await client.connection.whenState("connected");
 
         if (disposed) {
+          // The component unmounted while we were connecting — close this
+          // client instead of installing it as the active one.
+          console.log(
+            `[ABLY] client.close() (disposed during connect, canvasId=${canvasId})`
+          );
           client.close();
           return;
         }
@@ -965,6 +1032,12 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
 
         const channel = client.channels.get(`canvas:${canvasId}:collab`);
         channelRef.current = channel;
+
+        channel.on((stateChange) => {
+          console.log(
+            `[ABLY] channel state: ${channel.name} ${stateChange.previous} -> ${stateChange.current}`
+          );
+        });
 
         channel.subscribe("scene", handleSceneMessage);
         channel.presence.subscribe("enter", handlePresenceJoin);
@@ -976,11 +1049,11 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
 
         if (!disposed) {
           setIsCollaborating(true);
-          refreshCollaborators();
+          refreshCollaboratorsRef.current();
           // Periodically re-broadcast the full scene as a safety net for any
           // deltas lost to rate limits or flaky connections.
           resyncIntervalRef.current = setInterval(() => {
-            publishScene(
+            publishSceneRef.current(
               currentContentRef.current.elements,
               currentContentRef.current.appState,
               true
@@ -998,10 +1071,10 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
             setCollabError(
               "Live cursors are unavailable (realtime connection failed). Scene changes still sync automatically."
             );
-          } else if (client) {
-            // Transient failure — keep trying instead of giving up.
-            setCollabStatus("reconnecting");
-            scheduleReconnect(client);
+          } else {
+            // Transient failure — surface it; HTTP delta sync keeps the canvas
+            // consistent while realtime is unavailable.
+            setCollabStatus("offline");
           }
         }
       }
@@ -1023,6 +1096,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
 
     return () => {
       disposed = true;
+      console.log(`[ABLY] effect cleanup (canvasId=${canvasId})`);
       setIsCollaborating(false);
       setCollabError(null);
       receivedSceneRef.current = false;
@@ -1048,18 +1122,20 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         clearInterval(resyncIntervalRef.current);
         resyncIntervalRef.current = null;
       }
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
-        reconnectTimeoutRef.current = null;
-      }
-      if (reconnectResyncTimeoutRef.current) {
-        clearTimeout(reconnectResyncTimeoutRef.current);
-        reconnectResyncTimeoutRef.current = null;
-      }
       if (pointerIdleTimeoutRef.current) {
         clearTimeout(pointerIdleTimeoutRef.current);
         pointerIdleTimeoutRef.current = null;
       }
+      if (saveRetryTimerRef.current) {
+        clearTimeout(saveRetryTimerRef.current);
+        saveRetryTimerRef.current = null;
+      }
+      pendingSaveRef.current = null;
+      saveRetryCountRef.current = 0;
+
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
 
       const channel = channelRef.current;
       const client = ablyClientRef.current;
@@ -1067,35 +1143,22 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       ablyClientRef.current = null;
 
       if (channel) {
+        console.log(`[ABLY] leaving presence + detaching channel: ${channel.name}`);
         channel.presence.leave().catch(() => undefined);
         channel.unsubscribe();
         channel.detach().catch(() => undefined);
       }
       client?.connection.off();
+      if (client) {
+        console.log(`[ABLY] client.close() (cleanup, canvasId=${canvasId})`);
+      }
       client?.close();
     };
-  }, [canvasId, publishScene, refreshCollaborators, isRealtimeActive, syncCollaboratorsToSceneAndState]);
-
-  // Save content to backend API
-  const saveCanvasContent = useCallback(
-    async (elements: ExcalidrawElement[], appState: Partial<AppState>) => {
-      try {
-        const cleanAppState: Partial<AppState> = { ...appState };
-        delete cleanAppState.collaborators;
-
-        await canvasApi.updateContent(
-          canvasId,
-          JSON.stringify({
-            elements,
-            appState: cleanAppState,
-          })
-        );
-      } catch (err) {
-        console.warn("Failed to save canvas content to backend:", err);
-      }
-    },
-    [canvasId]
-  );
+    // The callbacks used by this effect are deliberately accessed through refs
+    // so their identity can never tear down and recreate the Ably connection.
+    // They only change with canvasId, which is the sole dependency.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canvasId]);
 
   // Handle canvas drawing changes: debounced realtime broadcast + auto-save
   const handleChange = (
@@ -1151,6 +1214,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
     function postOne(pointer: { x: number; y: number; tool: "pointer" | "laser" } | null) {
       const presence = myPresenceRef.current;
       if (!presence) return;
+      if (!isOnlineRef.current || document.hidden) return;
       pointerPostingRef.current = true;
       canvasApi
         .postPresence(canvasId, {
