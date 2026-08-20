@@ -1,109 +1,1308 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  Box,
-  IconButton,
-  Tooltip,
-  CircularProgress,
-  Avatar,
-  AvatarGroup,
-  Typography,
-  Divider,
-} from "@mui/material";
+import { useState, useEffect, useRef, useCallback } from "react";
+import { Box, IconButton, Tooltip, CircularProgress, Avatar, AvatarGroup, Typography, Divider } from "@mui/material";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import LightModeIcon from "@mui/icons-material/LightMode";
 import DarkModeIcon from "@mui/icons-material/DarkMode";
-import { Excalidraw } from "@excalidraw/excalidraw";
+import Ably from "ably";
+import { Excalidraw, CaptureUpdateAction, getSceneVersion, UserIdleState } from "@excalidraw/excalidraw";
 import type {
   AppState,
+  Collaborator,
   ExcalidrawImperativeAPI,
+  SocketId,
 } from "@excalidraw/excalidraw/types";
 import type { ExcalidrawElement } from "@excalidraw/excalidraw/element/types";
 import { useNavigate } from "@tanstack/react-router";
-import { useCanvasData } from "../hooks/useCanvasData";
-import { useCanvasCollaboration } from "../hooks/useCanvasCollaboration";
+import { canvasApi } from "../lib/api";
+import type { PresenceMember } from "../lib/api";
+import type { CanvasContent } from "../lib/types";
+import { getCurrentSession } from "../lib/auth";
 
 interface CanvasWorkspaceProps {
   canvasId: string;
 }
 
-/** How long to wait after the last drawing change before an auto-save. */
-const SAVE_DEBOUNCE_MS = 1500;
+interface CollabColor {
+  background: string;
+  stroke: string;
+}
+
+interface CollabPointer {
+  x: number;
+  y: number;
+  tool: "pointer" | "laser";
+}
+
+/** Payload stored in Ably presence for each connected user. */
+interface PresenceData {
+  name: string;
+  color: CollabColor;
+  pointer: CollabPointer | null;
+}
+
+/** Payload broadcast on the canvas channel to sync the scene. */
+interface SceneMessage {
+  elements: ExcalidrawElement[];
+  appState?: {
+    theme?: "light" | "dark";
+    viewBackgroundColor?: string;
+  };
+  /** Sender's full scene version (sum of element versions) at publish time. */
+  sceneVersion: number;
+  /** true = replace the whole scene; false = merge these elements into it. */
+  full: boolean;
+  /** Present when a large scene is split across multiple messages. */
+  chunk?: {
+    index: number;
+    total: number;
+    nonce: string;
+  };
+}
+
+// Ably caps each published message at 65536 bytes; chunked scene parts use a
+// conservative budget so the payload plus protocol overhead stays well under.
+const SCENE_CHUNK_BYTES = 32000;
+
+function byteLength(str: string): number {
+  return new TextEncoder().encode(str).length;
+}
+
+/** Splits elements into parts that each stay under the per-message byte budget. */
+function splitElements(
+  elements: readonly ExcalidrawElement[]
+): ExcalidrawElement[][] {
+  const parts: ExcalidrawElement[][] = [];
+  let part: ExcalidrawElement[] = [];
+  let partSize = 0;
+
+  for (const element of elements) {
+    const elementBytes = byteLength(JSON.stringify(element));
+    if (part.length > 0 && partSize + elementBytes > SCENE_CHUNK_BYTES) {
+      parts.push(part);
+      part = [element];
+      partSize = elementBytes;
+    } else {
+      part.push(element);
+      partSize += elementBytes;
+    }
+  }
+  if (part.length > 0) parts.push(part);
+
+  return parts;
+}
+
+/** Merges remote delta elements into the local scene, keeping the higher version. */
+function mergeSceneElements(
+  local: readonly ExcalidrawElement[],
+  remote: readonly ExcalidrawElement[]
+): ExcalidrawElement[] {
+  const byId = new Map<string, ExcalidrawElement>();
+  for (const element of local) byId.set(element.id, element);
+  for (const element of remote) {
+    const existing = byId.get(element.id);
+    if (
+      !existing ||
+      element.version > existing.version ||
+      (element.version === existing.version &&
+        element.versionNonce > existing.versionNonce)
+    ) {
+      byId.set(element.id, element);
+    }
+  }
+  return [...byId.values()];
+}
+
+const COLLAB_COLORS: CollabColor[] = [
+  { background: "#f472b6", stroke: "#9d174d" },
+  { background: "#60a5fa", stroke: "#1e40af" },
+  { background: "#34d399", stroke: "#065f46" },
+  { background: "#fbbf24", stroke: "#92400e" },
+  { background: "#a78bfa", stroke: "#5b21b6" },
+  { background: "#22d3ee", stroke: "#155e75" },
+];
+
+/** Min gap between in-progress scene broadcasts (streams strokes while drawing). */
+const SCENE_BROADCAST_THROTTLE_MS = 100;
+/** How long to wait after the last change before a final trailing broadcast. */
+const SCENE_BROADCAST_DELAY = 250;
+/** Minimum interval between pointer presence updates (80ms = 12.5fps smooth WebSocket stream). */
+const POINTER_THROTTLE_MS = 80;
+/** How long after the pointer stops moving before the cursor is cleared. */
+const POINTER_IDLE_CLEAR_MS = 1500;
+/** How often to re-broadcast the full scene as a safety net for dropped deltas. */
+const FULL_SCENE_RESYNC_MS = 20000;
+/** How often to poll the HTTP sync log for remote scene changes when realtime is offline. */
+const SCENE_POLL_MS = 2500;
+/** How often to send an HTTP presence heartbeat (keeps us marked online). */
+const PRESENCE_HEARTBEAT_MS = 10000;
+/** Minimum gap between full-scene (force) broadcasts to absorb reconnect bursts. */
+const FULL_PUBLISH_COALESCE_MS = 2000;
+function colorForUser(id: string): CollabColor {
+  let hash = 0;
+  for (let i = 0; i < id.length; i++) {
+    hash = (hash * 31 + id.charCodeAt(i)) | 0;
+  }
+  return COLLAB_COLORS[Math.abs(hash) % COLLAB_COLORS.length];
+}
 
 export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
-  const navigate = useNavigate();
+  const [loading, setLoading] = useState(true);
+  const [initialData, setInitialData] = useState<CanvasContent | null>(null);
+  const [workspaceId, setWorkspaceId] = useState<string | null>(null);
   const [editorTheme, setEditorTheme] = useState<"dark" | "light">("dark");
-  const excalidrawRef = useRef<ExcalidrawImperativeAPI | null>(null);
-  const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // Stable theme setter shared by the data + collaboration layers.
-  const setTheme = useCallback((theme: "light" | "dark") => {
-    setEditorTheme(theme);
-  }, []);
-
-  const data = useCanvasData(canvasId, setTheme);
-  const collab = useCanvasCollaboration(canvasId, {
-    contentRef: data.currentContentRef,
-    sceneVersionRef: data.currentSceneVersionRef,
-    lastDeltaSeqRef: data.lastDeltaSeqRef,
-    pendingRemoteSceneRef: data.pendingRemoteSceneRef,
-    receivedSceneRef: data.receivedSceneRef,
-    loadingRef: data.loadingRef,
-    excalidrawRef,
-    setTheme,
-    saveCanvasContent: data.saveCanvasContent,
-    flushPendingSave: data.flushPendingSave,
-  });
-
-  const {
-    loading,
-    initialData,
-    workspaceId,
-    currentContentRef,
-    receivedSceneRef,
-    setLocalContent,
-    saveCanvasContent,
-  } = data;
-
-  const {
-    isCollaborating,
-    collabStatus,
-    collabError,
-    currentUserInfo,
-    collaboratorsList,
-    broadcastLocalScene,
-    refreshCollaborators,
-    handlePointerUpdate,
-    setIsCollaborating,
-  } = collab;
-
+  const [isCollaborating, setIsCollaborating] = useState(false);
+  const [collabError, setCollabError] = useState<string | null>(null);
+  const [collabStatus, setCollabStatus] = useState<
+    "connecting" | "live" | "reconnecting" | "offline"
+  >("connecting");
   const isLight = editorTheme === "light";
 
-  // Handle canvas drawing changes: debounced realtime broadcast + auto-save.
-  // All dependencies are stable per canvasId, so this callback never changes
-  // identity between renders.
-  const handleChange = useCallback(
-    (elements: readonly ExcalidrawElement[], appState: AppState) => {
-      setLocalContent(elements, appState);
-      setEditorTheme(appState.theme === "light" ? "light" : "dark");
+  const navigate = useNavigate();
+  const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const broadcastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastSceneBroadcastRef = useRef(0);
+  const excalidrawRef = useRef<ExcalidrawImperativeAPI>(null);
+  const currentContentRef = useRef<CanvasContent>({
+    elements: [],
+    appState: { theme: "dark" },
+  });
+  const loadingRef = useRef(true);
+  const ablyClientRef = useRef<Ably.Realtime | null>(null);
+  const channelRef = useRef<Ably.RealtimeChannel | null>(null);
+  const connectionStateRef = useRef<Ably.ConnectionState>("initialized");
+  const myClientIdRef = useRef<string | null>(null);
+  const myPresenceRef = useRef<PresenceData | null>(null);
+  const currentSceneVersionRef = useRef(0);
+  const receivedSceneRef = useRef(false);
+  const pendingRemoteSceneRef = useRef<CanvasContent | null>(null);
+  const lastPointerPublishRef = useRef(0);
+  const pointerIdleTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const broadcastedElementVersionsRef = useRef<Map<string, number>>(new Map());
+  const resyncIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastFullPublishRef = useRef(0);
+  const lastFullSnapshotVersionRef = useRef(-1);
+  const lastDeltaSeqRef = useRef(0);
+  const syncPollingRef = useRef(false);
+  const deltaPostingRef = useRef(false);
+  const pendingDeltaRef = useRef<{
+    elements: ExcalidrawElement[];
+    sceneVersion: number;
+    full: boolean;
+  } | null>(null);
+  const pointerPostingRef = useRef(false);
+  const pendingPointerRef = useRef<{
+    pointer: { x: number; y: number; tool: "pointer" | "laser" } | null;
+  } | null>(null);
+  const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const myUserIdRef = useRef<string | null>(null);
+  const presenceHeartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const authFailedRef = useRef(false);
+  const isOnlineRef = useRef(typeof navigator !== "undefined" ? navigator.onLine : true);
+  const pendingSaveRef = useRef<{
+    elements: ExcalidrawElement[];
+    appState: Partial<AppState>;
+  } | null>(null);
+  const saveRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const saveRetryCountRef = useRef(0);
+  const saveCanvasContentRef = useRef<
+    (elements: ExcalidrawElement[], appState: Partial<AppState>) => Promise<void>
+  >(async () => {});
+  const sceneChunksRef = useRef<
+    Map<
+      string,
+      {
+        nonce: string;
+        total: number;
+        parts: Map<number, ExcalidrawElement[]>;
+        appState?: SceneMessage["appState"];
+        sceneVersion: number;
+        full: boolean;
+      }
+    >
+  >(new Map());
 
-      // Only broadcast after we have received a remote scene — otherwise we
-      // might overwrite fresher content from members who are already here with
-      // stale data loaded from the DB.
-      if (receivedSceneRef.current) {
-        broadcastLocalScene(elements, appState);
+  const collaboratorsRef = useRef<Map<SocketId, Collaborator>>(new Map());
+  const [collaboratorsList, setCollaboratorsList] = useState<Collaborator[]>([]);
+  const [currentUserInfo, setCurrentUserInfo] = useState<{ name: string; color: CollabColor }>({
+    name: "You",
+    color: COLLAB_COLORS[0],
+  });
+
+  const syncCollaboratorsToSceneAndState = useCallback(() => {
+    const nextMap = new Map(collaboratorsRef.current);
+    excalidrawRef.current?.updateScene({ collaborators: nextMap });
+    setCollaboratorsList(Array.from(collaboratorsRef.current.values()));
+  }, []);
+
+  // Publishes a scene message, splitting it into chunked parts if it exceeds
+  // the per-message byte budget.
+  const publishMessage = useCallback((channel: Ably.RealtimeChannel, message: SceneMessage) => {
+    const payload = JSON.stringify({
+      elements: message.elements,
+      appState: message.appState,
+      sceneVersion: message.sceneVersion,
+      full: message.full,
+    });
+
+    if (byteLength(payload) <= SCENE_CHUNK_BYTES) {
+      channel
+        .publish("scene", message)
+        .catch((error) => {
+          console.warn("Failed to broadcast scene:", error);
+        });
+      return;
+    }
+
+    const nonce = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const parts = splitElements(message.elements);
+    const total = parts.length;
+
+    const publishes = parts.map((partElements, index) => {
+      const isLast = index === total - 1;
+      return channel.publish("scene", {
+        ...message,
+        elements: partElements,
+        appState: isLast ? message.appState : undefined,
+        chunk: { index, total, nonce },
+      } satisfies SceneMessage);
+    });
+
+    Promise.allSettled(publishes).then((results) => {
+      const failed = results.find((r) => r.status === "rejected");
+      if (failed) {
+        console.warn(
+          "Failed to broadcast scene parts:",
+          (failed as PromiseRejectedResult).reason
+        );
+      }
+    });
+  }, []);
+
+  // Single-flight delta POST queue: at most one request in flight, so rapid
+  // drawing on a slow network can't flood the connection. If more changes
+  // arrive while a post is pending, only the newest state is sent when the
+  // current post resolves (pending elements are merged, keeping the latest
+  // version of each, so no changed element is lost).
+  const enqueueDelta = useCallback(
+    (elements: readonly ExcalidrawElement[], sceneVersion: number, full: boolean) => {
+      function postOne(
+        els: ExcalidrawElement[],
+        sv: number,
+        isFull: boolean
+      ) {
+        if (!isOnlineRef.current || document.hidden) return;
+        deltaPostingRef.current = true;
+        canvasApi
+          .postDelta(canvasId, { elements: els, sceneVersion: sv, full: isFull })
+          .then((res) => {
+            if (res.seq > lastDeltaSeqRef.current) {
+              lastDeltaSeqRef.current = res.seq;
+            }
+          })
+          .catch((err) => console.warn("Failed to post sync delta:", err))
+          .finally(() => {
+            deltaPostingRef.current = false;
+            const pending = pendingDeltaRef.current;
+            pendingDeltaRef.current = null;
+            if (pending) {
+              postOne(pending.elements, pending.sceneVersion, pending.full);
+            }
+          });
       }
 
-      if (saveTimeoutRef.current) {
-        clearTimeout(saveTimeoutRef.current);
+      if (deltaPostingRef.current) {
+        const prev = pendingDeltaRef.current;
+        const merged = new Map<string, ExcalidrawElement>();
+        if (prev) {
+          for (const el of prev.elements) merged.set(el.id, el);
+        }
+        for (const el of elements) merged.set(el.id, el);
+        pendingDeltaRef.current = {
+          elements: [...merged.values()],
+          sceneVersion,
+          full: full || (prev?.full ?? false),
+        };
+        return;
       }
-      saveTimeoutRef.current = setTimeout(() => {
-        saveCanvasContent([...elements], appState);
-      }, SAVE_DEBOUNCE_MS);
+      postOne([...elements], sceneVersion, full);
     },
-    [setLocalContent, receivedSceneRef, broadcastLocalScene, saveCanvasContent]
+    [canvasId]
   );
 
-  // Capture the Excalidraw imperative API (refs are unsupported since v0.17).
+  // Realtime is only truly usable when the Ably CHANNEL is attached (not just
+  // the connection being "connected" — the channel can be suspended while the
+  // connection looks fine). Every realtime fast-path and every HTTP fallback
+  // gate on this so collab degrades gracefully instead of silently dying.
+  const isRealtimeActive = useCallback(
+    () =>
+      !!channelRef.current &&
+      channelRef.current.state === "attached" &&
+      connectionStateRef.current === "connected",
+    []
+  );
+
+  // Broadcast local changes. The delta is always POSTed to the HTTP sync log
+  // (the reliable source of truth), and also published to Ably as a fast path
+  // when the realtime connection is up. `force` sends the whole scene (e.g.
+  // on a join or periodic resync).
+  const publishScene = useCallback(
+    (
+      elements: readonly ExcalidrawElement[],
+      appState: Partial<AppState>,
+      force = false
+    ) => {
+      const cleanAppState: SceneMessage["appState"] = {
+        theme: appState.theme,
+        viewBackgroundColor: appState.viewBackgroundColor,
+      };
+      const sceneVersion = getSceneVersion(elements);
+      const broadcasted = broadcastedElementVersionsRef.current;
+
+      let toSend: ExcalidrawElement[];
+      if (force) {
+        // Skip redundant full snapshots: only broadcast when the scene version
+        // actually changed, and coalesce so reconnect/join/resync bursts can't
+        // flood the sync log or Ably's per-connection rate limit.
+        if (lastFullSnapshotVersionRef.current === sceneVersion) return;
+        lastFullSnapshotVersionRef.current = sceneVersion;
+        const now = Date.now();
+        if (now - lastFullPublishRef.current < FULL_PUBLISH_COALESCE_MS) return;
+        lastFullPublishRef.current = now;
+
+        toSend = [...elements];
+        for (const element of toSend) {
+          broadcasted.set(element.id, element.version);
+        }
+      } else {
+        toSend = elements.filter((element) => {
+          const lastVersion = broadcasted.get(element.id);
+          return lastVersion === undefined || element.version > lastVersion;
+        });
+        if (toSend.length === 0) return;
+        for (const element of toSend) {
+          broadcasted.set(element.id, element.version);
+        }
+      }
+
+      const channel = channelRef.current;
+      const isRealtimeConnected = isRealtimeActive();
+
+      // Ably fast path — stream live scene deltas instantly over WebSockets
+      if (isRealtimeConnected && channel) {
+        publishMessage(channel, {
+          elements: toSend,
+          appState: cleanAppState,
+          sceneVersion,
+          full: force,
+        });
+      }
+
+      // HTTP sync log — persistence fallback when realtime is offline or on full snapshot resync
+      if (!isRealtimeConnected || force) {
+        enqueueDelta(toSend, sceneVersion, force);
+      }
+    },
+    [publishMessage, enqueueDelta, isRealtimeActive]
+  );
+
+  // Fetch initial canvas data from backend API
+  useEffect(() => {
+    async function loadCanvas() {
+      try {
+        setLoading(true);
+        const data = await canvasApi.getById(canvasId);
+
+        let parsedContent: CanvasContent | null = null;
+        if (data) {
+          if (data.workspaceId) setWorkspaceId(data.workspaceId);
+          // Deltas after this snapshot's seq are still missing from it, so
+          // polling starts there.
+          lastDeltaSeqRef.current = data.contentSeq ?? 0;
+
+          if (data.content && typeof data.content === "string") {
+            try {
+              parsedContent = JSON.parse(data.content) as CanvasContent;
+            } catch {
+              parsedContent = null;
+            }
+          } else if (data.content && typeof data.content === "object") {
+            parsedContent = data.content;
+          }
+        }
+
+        // A fresher scene may have arrived over the realtime channel while we
+        // were still loading the persisted copy — prefer that one.
+        const remoteScene = pendingRemoteSceneRef.current;
+        if (remoteScene) {
+          pendingRemoteSceneRef.current = null;
+          const scene: CanvasContent = {
+            elements: remoteScene.elements,
+            appState: { ...remoteScene.appState, viewModeEnabled: false },
+          };
+          setEditorTheme(
+            remoteScene.appState.theme === "light" ? "light" : "dark"
+          );
+          setInitialData(scene);
+          currentContentRef.current = scene;
+        } else if (parsedContent) {
+          const loadedAppState = { ...(parsedContent.appState || {}) };
+          const savedTheme =
+            loadedAppState.theme === "light" ? "light" : "dark";
+          const scene: CanvasContent = {
+            elements: parsedContent.elements || [],
+            appState: { ...loadedAppState, viewModeEnabled: false },
+          };
+          setEditorTheme(savedTheme);
+          setInitialData(scene);
+          currentContentRef.current = scene;
+        } else {
+          setEditorTheme("dark");
+          const scene: CanvasContent = {
+            elements: [],
+            appState: { theme: "dark", viewModeEnabled: false },
+          };
+          setInitialData(scene);
+          currentContentRef.current = scene;
+        }
+      } catch (err) {
+        console.warn(
+          "Could not fetch canvas data from backend, initializing empty:",
+          err
+        );
+        setEditorTheme("dark");
+        const scene: CanvasContent = {
+          elements: [],
+          appState: { theme: "dark", viewModeEnabled: false },
+        };
+        setInitialData(scene);
+        currentContentRef.current = scene;
+      } finally {
+        loadingRef.current = false;
+        setLoading(false);
+        currentSceneVersionRef.current = getSceneVersion(
+          currentContentRef.current.elements
+        );
+        receivedSceneRef.current = true;
+      }
+    }
+
+    if (canvasId) {
+      loadCanvas();
+    }
+  }, [canvasId]);
+
+  const refreshCollaborators = useCallback(async () => {
+    const channel = channelRef.current;
+    const myClientId = myClientIdRef.current;
+    if (!channel) return;
+
+    // Don't trigger a presence.get() when the channel is suspended/detached —
+    // it would hang on a 15s attach timeout that never completes while the
+    // socket is flapping. The HTTP presence fallback still covers this.
+    if (
+      channel.state === "suspended" ||
+      channel.state === "failed" ||
+      channel.state === "detached"
+    ) {
+      return;
+    }
+
+    try {
+      const members = await channel.presence.get();
+      collaboratorsRef.current.clear();
+
+      for (const member of members) {
+        if (member.clientId === myClientId) continue;
+
+        const data = member.data as PresenceData | undefined;
+        if (!data?.name) continue;
+
+        collaboratorsRef.current.set(member.clientId as SocketId, {
+          id: member.clientId,
+          socketId: member.clientId as SocketId,
+          username: data.name,
+          color: {
+            background: data.color?.background || "#f472b6",
+            stroke: data.color?.stroke || "#9d174d",
+          },
+          pointer: data.pointer
+            ? {
+                x: data.pointer.x,
+                y: data.pointer.y,
+                tool: data.pointer.tool || "pointer",
+                renderCursor: true,
+              }
+            : undefined,
+          userState: UserIdleState.ACTIVE,
+          button: "up",
+        });
+      }
+
+      syncCollaboratorsToSceneAndState();
+    } catch (err) {
+      console.warn("Failed to refresh collaborators:", err);
+    }
+  }, [syncCollaboratorsToSceneAndState]);
+
+  // Save content to backend API. On failure, the newest state is queued and
+  // retried with exponential backoff so the latest canvas content always
+  // reaches the backend once the network recovers.
+  const saveCanvasContent = useCallback(
+    async (elements: ExcalidrawElement[], appState: Partial<AppState>) => {
+      const cleanAppState: Partial<AppState> = { ...appState };
+      delete cleanAppState.collaborators;
+
+      try {
+        await canvasApi.updateContent(
+          canvasId,
+          JSON.stringify({
+            elements,
+            appState: cleanAppState,
+          })
+        );
+        // Save succeeded — clear any queued retry state.
+        pendingSaveRef.current = null;
+        saveRetryCountRef.current = 0;
+        if (saveRetryTimerRef.current) {
+          clearTimeout(saveRetryTimerRef.current);
+          saveRetryTimerRef.current = null;
+        }
+      } catch (err) {
+        console.warn("Failed to save canvas content to backend:", err);
+        // Keep the newest unsaved state and retry with exponential backoff.
+        pendingSaveRef.current = { elements: [...elements], appState: cleanAppState };
+        if (!saveRetryTimerRef.current) {
+          const attempt = saveRetryCountRef.current++;
+          const delay = Math.min(2000 * 2 ** attempt, 30000);
+          saveRetryTimerRef.current = setTimeout(() => {
+            saveRetryTimerRef.current = null;
+            const pending = pendingSaveRef.current;
+            if (pending) {
+              saveCanvasContentRef.current(pending.elements, pending.appState);
+            } else {
+              saveRetryCountRef.current = 0;
+            }
+          }, delay);
+        }
+      }
+    },
+    [canvasId]
+  );
+
+  // Immediately push any queued (unsaved) content once the network is back or
+  // the tab becomes visible again.
+  const flushPendingSave = useCallback(() => {
+    if (saveRetryTimerRef.current) {
+      clearTimeout(saveRetryTimerRef.current);
+      saveRetryTimerRef.current = null;
+    }
+    saveRetryCountRef.current = 0;
+    const pending = pendingSaveRef.current;
+    if (pending) {
+      pendingSaveRef.current = null;
+      saveCanvasContent(pending.elements, pending.appState);
+    }
+  }, [saveCanvasContent]);
+
+  // The Ably effect must never re-run because a callback identity changed, or
+  // React will tear down and recreate the connection. All callbacks the effect
+  // needs are held in refs and read through `.current`, so the effect's only
+  // dependency is canvasId itself.
+  const publishSceneRef = useRef(publishScene);
+  const refreshCollaboratorsRef = useRef(refreshCollaborators);
+  const isRealtimeActiveRef = useRef(isRealtimeActive);
+  const syncCollaboratorsToSceneAndStateRef = useRef(syncCollaboratorsToSceneAndState);
+  const flushPendingSaveRef = useRef(flushPendingSave);
+
+  // Set up the Ably realtime connection: presence for live cursors and a
+  // channel for scene synchronization between members of the workspace.
+  // The effect depends ONLY on canvasId — every realtime callback is accessed
+  // through a ref (see above) so React re-renders can never tear down and
+  // recreate the connection.
+  useEffect(() => {
+    let disposed = false;
+    console.log(`[ABLY] effect setup (canvasId=${canvasId})`);
+
+    // Keep the callback refs pointed at the latest identity. These only change
+    // when canvasId changes (which re-runs this effect), so assigning here is
+    // always in sync with the closure below.
+    publishSceneRef.current = publishScene;
+    refreshCollaboratorsRef.current = refreshCollaborators;
+    isRealtimeActiveRef.current = isRealtimeActive;
+    syncCollaboratorsToSceneAndStateRef.current = syncCollaboratorsToSceneAndState;
+    flushPendingSaveRef.current = flushPendingSave;
+    saveCanvasContentRef.current = saveCanvasContent;
+
+    // Track network connectivity and tab visibility so we can pause HTTP
+    // fallback traffic (polls/heartbeats/saves) while the connection is dead
+    // and flush anything queued the moment it recovers.
+    isOnlineRef.current = navigator.onLine;
+    const handleOnline = () => {
+      isOnlineRef.current = true;
+      setCollabStatus((prev) => (prev === "offline" ? "reconnecting" : prev));
+      flushPendingSaveRef.current();
+    };
+    const handleOffline = () => {
+      isOnlineRef.current = false;
+    };
+    const handleVisibilityChange = () => {
+      if (document.hidden) return;
+      // Tab visible again — push anything we paused while hidden.
+      flushPendingSaveRef.current();
+      pollSync();
+      sendPresenceHeartbeat();
+    };
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    const handlePresenceMessage = (member: Ably.PresenceMessage) => {
+      if (member.clientId === myClientIdRef.current) return;
+
+      const socketId = member.clientId as SocketId;
+      if (member.action === "leave" || member.action === "absent") {
+        collaboratorsRef.current.delete(socketId);
+      } else {
+        const data = member.data as PresenceData | undefined;
+        if (data?.name) {
+          collaboratorsRef.current.set(socketId, {
+            id: member.clientId,
+            socketId,
+            username: data.name,
+            color: {
+              background: data.color?.background || "#f472b6",
+              stroke: data.color?.stroke || "#9d174d",
+            },
+            pointer: data.pointer
+              ? {
+                  x: data.pointer.x,
+                  y: data.pointer.y,
+                  tool: data.pointer.tool || "pointer",
+                  renderCursor: true,
+                }
+              : undefined,
+            userState: UserIdleState.ACTIVE,
+            button: "up",
+          });
+        }
+      }
+
+      syncCollaboratorsToSceneAndStateRef.current();
+    };
+
+    const handlePresenceJoin = (member: Ably.PresenceMessage) => {
+      if (member.clientId === myClientIdRef.current) return;
+
+      handlePresenceMessage(member);
+      // Share our in-memory scene (fresher than what the DB may have) so the
+      // new member catches up immediately. Receivers ignore stale scenes via
+      // the scene-version guard, so broadcasting is safe even if we are not
+      // fully synced yet.
+      publishSceneRef.current(
+        currentContentRef.current.elements,
+        currentContentRef.current.appState,
+        true
+      );
+    };
+
+    const handlePresenceChange = (member: Ably.PresenceMessage) => {
+      handlePresenceMessage(member);
+    };
+
+    const applyScene = (data: SceneMessage) => {
+      // Ignore echoes and stale scenes (older than what we already have).
+      if (data.sceneVersion <= currentSceneVersionRef.current) return;
+
+      const appState: SceneMessage["appState"] = {
+        theme: data.appState?.theme,
+        viewBackgroundColor: data.appState?.viewBackgroundColor,
+      };
+
+      // Drop any pending local broadcast so we don't overwrite the fresher
+      // remote scene with a stale one.
+      if (broadcastTimeoutRef.current) {
+        clearTimeout(broadcastTimeoutRef.current);
+        broadcastTimeoutRef.current = null;
+      }
+
+      if (loadingRef.current) {
+        // Editor not mounted yet — keep the freshest full scene as the initial
+        // scene, merging any deltas that arrive on top of it.
+        const pending = pendingRemoteSceneRef.current;
+        if (data.full) {
+          pendingRemoteSceneRef.current = { elements: data.elements, appState };
+        } else if (pending) {
+          pending.elements = mergeSceneElements(pending.elements, data.elements);
+        }
+        receivedSceneRef.current = true;
+        return;
+      }
+
+      receivedSceneRef.current = true;
+
+      const localElements = currentContentRef.current.elements;
+      const nextElements = data.full
+        ? data.elements
+        : mergeSceneElements(localElements, data.elements);
+      currentContentRef.current = {
+        elements: nextElements,
+        appState: currentContentRef.current.appState,
+      };
+      currentSceneVersionRef.current = Math.max(
+        data.sceneVersion,
+        getSceneVersion(nextElements)
+      );
+
+      // Mark received elements as "already broadcast" so we don't echo remote
+      // changes straight back out. Local edits to the same element get a higher
+      // version and are still sent.
+      for (const element of data.elements) {
+        broadcastedElementVersionsRef.current.set(element.id, element.version);
+      }
+
+      excalidrawRef.current?.updateScene({
+        elements: nextElements,
+        appState: {
+          theme: appState.theme ?? "dark",
+          viewBackgroundColor:
+            appState.viewBackgroundColor ??
+            (appState.theme === "light" ? "#ffffff" : "#121212"),
+        },
+        collaborators: new Map(collaboratorsRef.current),
+        captureUpdate: CaptureUpdateAction.NEVER,
+      });
+
+      if (appState.theme === "light" || appState.theme === "dark") {
+        setEditorTheme(appState.theme);
+      }
+    };
+
+    const handleSceneMessage = (message: Ably.Message) => {
+      const data = message.data as SceneMessage | undefined;
+      if (!data || !Array.isArray(data.elements)) return;
+
+      // A scene split across multiple messages: buffer the parts, then apply
+      // the assembled scene once every part has arrived.
+      if (data.chunk) {
+        const sender = message.clientId ?? "unknown";
+        const { index, total, nonce } = data.chunk;
+        let buffer = sceneChunksRef.current.get(sender);
+
+        if (!buffer || buffer.nonce !== nonce) {
+          buffer = {
+            nonce,
+            total,
+            parts: new Map(),
+            appState: undefined,
+            sceneVersion: data.sceneVersion,
+            full: data.full,
+          };
+          sceneChunksRef.current.set(sender, buffer);
+        }
+
+        buffer.parts.set(index, data.elements);
+        if (data.appState) buffer.appState = data.appState;
+
+        if (buffer.parts.size < total) return;
+
+        sceneChunksRef.current.delete(sender);
+
+        const assembled: ExcalidrawElement[] = [];
+        for (let i = 0; i < total; i++) {
+          const part = buffer.parts.get(i);
+          if (!part) return;
+          assembled.push(...part);
+        }
+
+        applyScene({
+          elements: assembled,
+          appState: buffer.appState ?? {},
+          sceneVersion: buffer.sceneVersion,
+          full: buffer.full,
+        });
+        return;
+      }
+
+      applyScene(data);
+    };
+
+    // Poll the HTTP sync log for remote scene changes. Used as a fallback when
+    // the realtime (Ably) channel is disconnected.
+    const pollSync = async () => {
+      if (disposed || loadingRef.current || syncPollingRef.current) return;
+      // Don't hammer a dead connection while the network is down or the tab
+      // is hidden — poll again as soon as we're online/visible.
+      if (!isOnlineRef.current || document.hidden) return;
+      // Skip HTTP polling only when realtime is genuinely active (channel
+      // attached) — the connection can say "connected" while the channel is
+      // suspended, in which case Ably isn't delivering anything and we MUST
+      // keep polling the sync log or the canvas stops updating.
+      if (isRealtimeActiveRef.current()) return;
+
+      syncPollingRef.current = true;
+      try {
+        const result = await canvasApi.getDeltas(
+          canvasId,
+          lastDeltaSeqRef.current
+        );
+        for (const delta of result.deltas) {
+          applyScene({
+            elements: delta.elements as ExcalidrawElement[],
+            sceneVersion: delta.sceneVersion,
+            full: delta.full,
+          });
+        }
+        if (result.latestSeq > lastDeltaSeqRef.current) {
+          lastDeltaSeqRef.current = result.latestSeq;
+        }
+        // Fold presence (avatars + live cursors) into the same round trip.
+        updateCollaboratorsFromHttp(result.presence);
+      } catch {
+        // Transient network/backend hiccup — the next poll will retry.
+      } finally {
+        syncPollingRef.current = false;
+      }
+    };
+
+    // HTTP presence: keep us marked online (with our latest pointer) and
+    // refresh the collaborator avatar stack. Works independently of Ably, so
+    // avatars and cursors appear even when the realtime channel is unreachable.
+    const sendPresenceHeartbeat = async () => {
+      if (disposed) return;
+      if (!isOnlineRef.current || document.hidden) return;
+      const info = myPresenceRef.current;
+      if (!info) return;
+      try {
+        await canvasApi.postPresence(canvasId, {
+          name: info.name,
+          color: info.color,
+          pointer: info.pointer,
+        });
+      } catch {
+        // Transient failure — the next heartbeat retries.
+      }
+    };
+
+    const updateCollaboratorsFromHttp = (
+      members: PresenceMember[]
+    ) => {
+      if (disposed) return;
+
+      for (const member of members) {
+        if (member.userId === myUserIdRef.current) continue;
+
+        const socketId = member.userId as SocketId;
+        // Don't overwrite active Ably presence data if already stored
+        if (!collaboratorsRef.current.has(socketId)) {
+          collaboratorsRef.current.set(socketId, {
+            id: member.userId,
+            socketId,
+            username: member.name,
+            color: {
+              background: member.color?.background || "#f472b6",
+              stroke: member.color?.stroke || "#9d174d",
+            },
+            pointer: member.pointer
+              ? {
+                  x: member.pointer.x,
+                  y: member.pointer.y,
+                  tool: member.pointer.tool || "pointer",
+                  renderCursor: true,
+                }
+              : undefined,
+            userState: UserIdleState.ACTIVE,
+            button: "up",
+          });
+        }
+      }
+
+      syncCollaboratorsToSceneAndStateRef.current();
+    };
+
+    async function setupRealtime() {
+      authFailedRef.current = false;
+      setCollabError(null);
+
+      try {
+        const session = await getCurrentSession();
+        const userName =
+          session.user?.name || session.user?.email || "Anonymous";
+        const userId = session.user?.id || "anonymous";
+        const color = colorForUser(userId);
+
+        myUserIdRef.current = userId;
+
+        // The component may have unmounted (or StrictMode re-ran the effect)
+        // while we were fetching the session. Bail out before creating a client
+        // so we never connect-then-close in the first place.
+        if (disposed) return;
+
+        console.log(`[ABLY] creating Realtime client (canvasId=${canvasId})`);
+        const client = new Ably.Realtime({
+          // Token is fetched from our authenticated backend, which verifies
+          // the session cookie and scopes the token to this canvas only.
+          // echoMessages is off so our own broadcasts aren't re-delivered
+          // and re-processed on flaky connections. Reconnect behavior is left
+          // entirely to the SDK — no manual connect(), no custom recovery.
+          logLevel: 1,
+          echoMessages: false,
+          authCallback: (_data, callback) => {
+            canvasApi
+              .getAblyToken(canvasId)
+              .then((tokenRequest) => {
+                authFailedRef.current = false;
+                callback(null, tokenRequest);
+              })
+              .catch((error) => {
+                authFailedRef.current = true;
+                callback(error, null);
+              });
+          },
+        });
+
+        ablyClientRef.current = client;
+        myPresenceRef.current = { name: userName, color, pointer: null };
+        setCurrentUserInfo({ name: userName, color });
+        // Send our initial HTTP presence heartbeat right away so peers see us
+        // (and our avatar) even before any realtime connection is established.
+        sendPresenceHeartbeat();
+
+        // Track connection state so we never publish into a dead socket.
+        // Ably manages the reconnect cycle on its own; we only observe it.
+        client.connection.on((stateChange) => {
+          const state = stateChange.current;
+          const previous = stateChange.previous;
+          connectionStateRef.current = state;
+          console.log(
+            `[ABLY] connection state: ${previous} -> ${state}`,
+            stateChange.reason ?? ""
+          );
+
+          switch (state) {
+            case "connected": {
+              if (disposed) return;
+              setCollabStatus("live");
+              setCollabError(null);
+              // Fresh connection (initial or after an Ably-managed reconnect)
+              // — refresh the member list so new peers appear. The channel
+              // reattaches on its own; no need to force it.
+              if (channelRef.current) {
+                refreshCollaboratorsRef.current();
+              }
+              break;
+            }
+            case "disconnected":
+            case "suspended":
+              if (disposed) return;
+              setCollabStatus("reconnecting");
+              break;
+            case "failed":
+              if (disposed) return;
+              if (authFailedRef.current) {
+                // Token minting failed — retrying won't help, surface it.
+                setCollabStatus("offline");
+                setCollabError(
+                  "Live cursors are unavailable (realtime connection failed). Scene changes still sync automatically."
+                );
+              } else {
+                // Ably does not auto-reconnect from "failed"; surface it and
+                // let a fresh mount re-establish the connection. HTTP delta
+                // sync keeps the canvas consistent in the meantime.
+                setCollabStatus("offline");
+              }
+              break;
+            default:
+              break;
+          }
+        });
+
+        await client.connection.whenState("connected");
+
+        if (disposed) {
+          // The component unmounted while we were connecting — close this
+          // client instead of installing it as the active one.
+          console.log(
+            `[ABLY] client.close() (disposed during connect, canvasId=${canvasId})`
+          );
+          client.close();
+          return;
+        }
+
+        myClientIdRef.current = client.clientId;
+
+        const channel = client.channels.get(`canvas:${canvasId}:collab`);
+        channelRef.current = channel;
+
+        channel.on((stateChange) => {
+          console.log(
+            `[ABLY] channel state: ${channel.name} ${stateChange.previous} -> ${stateChange.current}`
+          );
+        });
+
+        channel.subscribe("scene", handleSceneMessage);
+        channel.presence.subscribe("enter", handlePresenceJoin);
+        channel.presence.subscribe("present", handlePresenceJoin);
+        channel.presence.subscribe("update", handlePresenceChange);
+        channel.presence.subscribe("leave", handlePresenceChange);
+
+        await channel.presence.enter({ name: userName, color, pointer: null });
+
+        if (!disposed) {
+          setIsCollaborating(true);
+          refreshCollaboratorsRef.current();
+          // Periodically re-broadcast the full scene as a safety net for any
+          // deltas lost to rate limits or flaky connections.
+          resyncIntervalRef.current = setInterval(() => {
+            publishSceneRef.current(
+              currentContentRef.current.elements,
+              currentContentRef.current.appState,
+              true
+            );
+          }, FULL_SCENE_RESYNC_MS);
+        }
+      } catch (error) {
+        console.warn(
+          "Realtime collaboration could not be enabled (is ABLY_API_KEY set on the backend?):",
+          error
+        );
+        if (!disposed) {
+          if (authFailedRef.current) {
+            setCollabStatus("offline");
+            setCollabError(
+              "Live cursors are unavailable (realtime connection failed). Scene changes still sync automatically."
+            );
+          } else {
+            // Transient failure — surface it; HTTP delta sync keeps the canvas
+            // consistent while realtime is unavailable.
+            setCollabStatus("offline");
+          }
+        }
+      }
+    }
+
+    setupRealtime();
+
+    // Poll the HTTP sync log for remote changes (reliable path — independent
+    // of the Ably connection).
+    pollTimerRef.current = setInterval(pollSync, SCENE_POLL_MS);
+    pollSync();
+
+    // HTTP presence: heartbeat our online status and keep the avatar stack
+    // fresh without relying on the realtime channel.
+    presenceHeartbeatRef.current = setInterval(
+      sendPresenceHeartbeat,
+      PRESENCE_HEARTBEAT_MS
+    );
+
+    return () => {
+      disposed = true;
+      console.log(`[ABLY] effect cleanup (canvasId=${canvasId})`);
+      setIsCollaborating(false);
+      setCollabError(null);
+      receivedSceneRef.current = false;
+      pendingRemoteSceneRef.current = null;
+      broadcastedElementVersionsRef.current.clear();
+      sceneChunksRef.current.clear();
+      myClientIdRef.current = null;
+      myPresenceRef.current = null;
+
+      if (pollTimerRef.current) {
+        clearInterval(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+      if (presenceHeartbeatRef.current) {
+        clearInterval(presenceHeartbeatRef.current);
+        presenceHeartbeatRef.current = null;
+      }
+      // Mark us offline via HTTP presence so our avatar disappears promptly.
+      if (myUserIdRef.current) {
+        canvasApi.removePresence(canvasId).catch(() => undefined);
+      }
+      if (resyncIntervalRef.current) {
+        clearInterval(resyncIntervalRef.current);
+        resyncIntervalRef.current = null;
+      }
+      if (pointerIdleTimeoutRef.current) {
+        clearTimeout(pointerIdleTimeoutRef.current);
+        pointerIdleTimeoutRef.current = null;
+      }
+      if (saveRetryTimerRef.current) {
+        clearTimeout(saveRetryTimerRef.current);
+        saveRetryTimerRef.current = null;
+      }
+      pendingSaveRef.current = null;
+      saveRetryCountRef.current = 0;
+
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+
+      const channel = channelRef.current;
+      const client = ablyClientRef.current;
+      channelRef.current = null;
+      ablyClientRef.current = null;
+
+      if (channel) {
+        console.log(`[ABLY] leaving presence + detaching channel: ${channel.name}`);
+        channel.presence.leave().catch(() => undefined);
+        channel.unsubscribe();
+        channel.detach().catch(() => undefined);
+      }
+      client?.connection.off();
+      if (client) {
+        console.log(`[ABLY] client.close() (cleanup, canvasId=${canvasId})`);
+      }
+      client?.close();
+    };
+    // The callbacks used by this effect are deliberately accessed through refs
+    // so their identity can never tear down and recreate the Ably connection.
+    // They only change with canvasId, which is the sole dependency.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canvasId]);
+
+  // Handle canvas drawing changes: debounced realtime broadcast + auto-save
+  const handleChange = (
+    elements: readonly ExcalidrawElement[],
+    appState: AppState
+  ) => {
+    currentContentRef.current = {
+      elements: [...elements],
+      appState,
+    };
+    currentSceneVersionRef.current = getSceneVersion(elements);
+
+    setEditorTheme(appState.theme === "light" ? "light" : "dark");
+
+    // Only broadcast after we have received a remote scene — otherwise we
+    // might overwrite fresher content from members who are already here with
+    // stale data loaded from the DB.
+    if (receivedSceneRef.current) {
+      // Throttle (not debounce) so in-progress strokes stream to peers while
+      // they're being drawn; a trailing send flushes the final stroke state.
+      const now = Date.now();
+      if (now - lastSceneBroadcastRef.current >= SCENE_BROADCAST_THROTTLE_MS) {
+        lastSceneBroadcastRef.current = now;
+        publishScene(elements, appState);
+      } else {
+        if (broadcastTimeoutRef.current) {
+          clearTimeout(broadcastTimeoutRef.current);
+        }
+        broadcastTimeoutRef.current = setTimeout(() => {
+          broadcastTimeoutRef.current = null;
+          lastSceneBroadcastRef.current = Date.now();
+          publishScene(elements, appState);
+        }, SCENE_BROADCAST_DELAY);
+      }
+    }
+
+    if (saveTimeoutRef.current) {
+      clearTimeout(saveTimeoutRef.current);
+    }
+    saveTimeoutRef.current = setTimeout(() => {
+      saveCanvasContent([...elements], appState);
+    }, 1500);
+  };
+
+  // Stream pointer position to other members so they can render our live
+  // cursor (arrow + name). Always posts to the HTTP presence endpoint so it
+  // reaches every peer regardless of connectivity; when the Ably channel is
+  // connected it also updates Ably presence for smoother realtime delivery.
+  // Flush the latest pointer to the HTTP presence endpoint. Single-flight:
+  // at most one POST in flight, so rapid pointer movement on a slow network
+  // can't flood the connection — the newest position wins when it resolves.
+  const flushPointerPost = useCallback(() => {
+    function postOne(pointer: { x: number; y: number; tool: "pointer" | "laser" } | null) {
+      const presence = myPresenceRef.current;
+      if (!presence) return;
+      if (!isOnlineRef.current || document.hidden) return;
+      pointerPostingRef.current = true;
+      canvasApi
+        .postPresence(canvasId, {
+          name: presence.name,
+          color: presence.color,
+          pointer,
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          pointerPostingRef.current = false;
+          const pending = pendingPointerRef.current;
+          if (pending) {
+            pendingPointerRef.current = null;
+            postOne(pending.pointer);
+          }
+        });
+    }
+
+    if (pointerPostingRef.current) return;
+    const pending = pendingPointerRef.current;
+    if (!pending) return;
+    pendingPointerRef.current = null;
+    postOne(pending.pointer);
+  }, [canvasId]);
+
+  const publishPointer = useCallback(
+    (pointer: { x: number; y: number; tool: "pointer" | "laser" } | null) => {
+      const presence = myPresenceRef.current;
+      if (!presence) return;
+
+      const updated: PresenceData = { ...presence, pointer };
+      myPresenceRef.current = updated;
+
+      const channel = channelRef.current;
+      if (channel && isRealtimeActive()) {
+        // Fast path: stream pointer directly over Ably WebSocket
+        channel.presence.update(updated).catch(() => undefined);
+      } else {
+        // Fallback: flush over HTTP presence when the Ably channel isn't
+        // attached (connection "connected" but channel suspended still lands
+        // here, so cursors keep flowing over HTTP instead of dying silently).
+        pendingPointerRef.current = { pointer };
+        flushPointerPost();
+      }
+    },
+    [flushPointerPost, isRealtimeActive]
+  );
+
+  const handlePointerUpdate = useCallback(
+    (payload: {
+      pointer: { x: number; y: number; tool: "pointer" | "laser" };
+      button: "down" | "up";
+    }) => {
+      const now = Date.now();
+      if (now - lastPointerPublishRef.current < POINTER_THROTTLE_MS) return;
+      lastPointerPublishRef.current = now;
+
+      publishPointer({
+        x: payload.pointer.x,
+        y: payload.pointer.y,
+        tool: payload.pointer.tool,
+      });
+
+      // While actively drawing, stream the in-progress scene straight from
+      // pointer movement — a safety net that doesn't rely on onChange's
+      // cadence. publishScene dedupes by element version, so repeated calls
+      // are no-ops when nothing changed.
+      if (payload.button === "down") {
+        const elements = excalidrawRef.current?.getSceneElements();
+        if (elements) {
+          publishScene(elements, currentContentRef.current.appState);
+        }
+      }
+
+      // Clear the cursor after the pointer goes idle so it fades instead of
+      // freezing at the last position.
+      if (pointerIdleTimeoutRef.current) {
+        clearTimeout(pointerIdleTimeoutRef.current);
+      }
+      pointerIdleTimeoutRef.current = setTimeout(() => {
+        pointerIdleTimeoutRef.current = null;
+        publishPointer(null);
+      }, POINTER_IDLE_CLEAR_MS);
+    },
+    [publishPointer, publishScene]
+  );
+
+  // Capture the Excalidraw imperative API (refs are unsupported since v0.17)
   const handleExcalidrawAPI = useCallback(
     (api: ExcalidrawImperativeAPI) => {
       excalidrawRef.current = api;
@@ -112,35 +1311,21 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       setIsCollaborating(true);
       refreshCollaborators();
     },
-    [setIsCollaborating, refreshCollaborators]
+    [refreshCollaborators]
   );
 
-  // Toggle the whole editor between light and dark theme.
+  // Toggle the whole editor between light and dark theme
   const handleToggleBackground = useCallback(() => {
     const next: "dark" | "light" = editorTheme === "dark" ? "light" : "dark";
     setEditorTheme(next);
     const appState = currentContentRef.current.appState || {};
-    const updatedAppState = {
-      ...appState,
-      theme: next,
-      viewBackgroundColor: "#ffffff",
-    };
+    const updatedAppState = { ...appState, theme: next, viewBackgroundColor: "#ffffff" };
     currentContentRef.current.appState = updatedAppState;
     excalidrawRef.current?.updateScene({
       appState: { theme: next, viewBackgroundColor: "#ffffff" },
     });
     saveCanvasContent(currentContentRef.current.elements, updatedAppState);
-  }, [editorTheme, currentContentRef, excalidrawRef, saveCanvasContent]);
-
-  // Drop a pending auto-save when the canvas changes or the component unmounts.
-  useEffect(() => {
-    return () => {
-      if (saveTimeoutRef.current) {
-        clearTimeout(saveTimeoutRef.current);
-        saveTimeoutRef.current = null;
-      }
-    };
-  }, [canvasId]);
+  }, [editorTheme, saveCanvasContent]);
 
   return (
     <Box
@@ -261,17 +1446,12 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
                       ? "#fbbf24"
                       : "#f87171",
                 boxShadow:
-                  collabStatus === "live" ? "0 0 8px #34d399" : "none",
+                  collabStatus === "live"
+                    ? "0 0 8px #34d399"
+                    : "none",
               }}
             />
-            <Typography
-              variant="caption"
-              sx={{
-                color: "#ECECEC",
-                fontWeight: 600,
-                fontSize: "0.75rem",
-              }}
-            >
+            <Typography variant="caption" sx={{ color: "#ECECEC", fontWeight: 600, fontSize: "0.75rem" }}>
               {collabStatus === "live"
                 ? `${collaboratorsList.length + 1} Online`
                 : collabStatus === "reconnecting"
@@ -280,14 +1460,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
             </Typography>
           </Box>
 
-          <Divider
-            orientation="vertical"
-            flexItem
-            sx={{
-              borderColor: "rgba(255,255,255,0.15)",
-              my: 0.25,
-            }}
-          />
+          <Divider orientation="vertical" flexItem sx={{ borderColor: "rgba(255,255,255,0.15)", my: 0.25 }} />
 
           {/* Active Collaborators Avatars */}
           <AvatarGroup
@@ -303,11 +1476,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
             }}
           >
             {/* Self Avatar */}
-            <Tooltip
-              title={`${currentUserInfo.name} (You)`}
-              arrow
-              placement="bottom"
-            >
+            <Tooltip title={`${currentUserInfo.name} (You)`} arrow placement="bottom">
               <Avatar
                 sx={{
                   bgcolor: currentUserInfo.color.background,
@@ -320,26 +1489,16 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
             </Tooltip>
 
             {/* Remote Collaborators Avatars */}
-            {collaboratorsList.map((member) => (
+            {collaboratorsList.map((collab) => (
               <Tooltip
-                key={member.id || member.username}
+                key={collab.id || collab.username}
                 title={
                   <Box sx={{ p: 0.25 }}>
-                    <Typography
-                      variant="subtitle2"
-                      sx={{ fontWeight: 700, fontSize: "0.8rem" }}
-                    >
-                      {member.username}
+                    <Typography variant="subtitle2" sx={{ fontWeight: 700, fontSize: "0.8rem" }}>
+                      {collab.username}
                     </Typography>
-                    <Typography
-                      variant="caption"
-                      sx={{
-                        color: "#a1a1aa",
-                        fontSize: "0.7rem",
-                        display: "block",
-                      }}
-                    >
-                      {member.pointer ? "Active on canvas" : "Online"}
+                    <Typography variant="caption" sx={{ color: "#a1a1aa", fontSize: "0.7rem", display: "block" }}>
+                      {collab.pointer ? "Active on canvas" : "Online"}
                     </Typography>
                   </Box>
                 }
@@ -348,9 +1507,9 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
               >
                 <Avatar
                   sx={{
-                    bgcolor: member.color?.background || "#a78bfa",
+                    bgcolor: collab.color?.background || "#a78bfa",
                     color: "#ffffff",
-                    outline: `2px solid ${member.color?.stroke || "#5b21b6"}`,
+                    outline: `2px solid ${collab.color?.stroke || "#5b21b6"}`,
                     cursor: "pointer",
                     transition: "transform 0.15s ease",
                     "&:hover": {
@@ -359,7 +1518,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
                     },
                   }}
                 >
-                  {(member.username || "A").charAt(0).toUpperCase()}
+                  {(collab.username || "A").charAt(0).toUpperCase()}
                 </Avatar>
               </Tooltip>
             ))}
@@ -368,14 +1527,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       )}
 
       {/* Main Canvas Viewport */}
-      <Box
-        sx={{
-          flexGrow: 1,
-          width: "100%",
-          height: "100%",
-          position: "relative",
-        }}
-      >
+      <Box sx={{ flexGrow: 1, width: "100%", height: "100%", position: "relative" }}>
         {loading ? (
           <Box
             sx={{
