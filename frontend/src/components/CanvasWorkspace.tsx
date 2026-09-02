@@ -349,7 +349,8 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
     (
       elements: readonly ExcalidrawElement[],
       appState: Partial<AppState>,
-      force = false
+      force = false,
+      bypassCoalesce = false
     ) => {
       const cleanAppState: SceneMessage["appState"] = {
         theme: appState.theme,
@@ -363,11 +364,13 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         // Skip redundant full snapshots: only broadcast when the scene version
         // actually changed, and coalesce so reconnect/join/resync bursts can't
         // flood the sync log or Ably's per-connection rate limit.
-        if (lastFullSnapshotVersionRef.current === sceneVersion) return;
+        if (!bypassCoalesce) {
+          if (lastFullSnapshotVersionRef.current === sceneVersion) return;
+          const now = Date.now();
+          if (now - lastFullPublishRef.current < FULL_PUBLISH_COALESCE_MS) return;
+          lastFullPublishRef.current = now;
+        }
         lastFullSnapshotVersionRef.current = sceneVersion;
-        const now = Date.now();
-        if (now - lastFullPublishRef.current < FULL_PUBLISH_COALESCE_MS) return;
-        lastFullPublishRef.current = now;
 
         toSend = [...elements];
         for (const element of toSend) {
@@ -397,10 +400,8 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         });
       }
 
-      // HTTP sync log — persistence fallback when realtime is offline or on full snapshot resync
-      if (!isRealtimeConnected || force) {
-        enqueueDelta(toSend, sceneVersion, force);
-      }
+      // HTTP sync log — reliable persistence log for all edits & snapshots
+      enqueueDelta(toSend, sceneVersion, force);
     },
     [publishMessage, enqueueDelta, isRealtimeActive]
   );
@@ -510,16 +511,25 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
     try {
       const members = await channel.presence.get();
       collaboratorsRef.current.clear();
+      const currentConnectionId = ablyClientRef.current?.connection.id;
 
       for (const member of members) {
-        if (member.clientId === myClientId) continue;
+        if (
+          currentConnectionId
+            ? member.connectionId === currentConnectionId
+            : member.clientId === myClientId
+        ) {
+          continue;
+        }
 
         const data = member.data as PresenceData | undefined;
         if (!data?.name) continue;
 
-        collaboratorsRef.current.set(member.clientId as SocketId, {
-          id: member.clientId,
-          socketId: member.clientId as SocketId,
+        const socketId = (member.connectionId || member.clientId) as SocketId;
+
+        collaboratorsRef.current.set(socketId, {
+          id: member.connectionId || member.clientId,
+          socketId,
           username: data.name,
           color: {
             background: data.color?.background || "#f472b6",
@@ -657,16 +667,23 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
     document.addEventListener("visibilitychange", handleVisibilityChange);
 
     const handlePresenceMessage = (member: Ably.PresenceMessage) => {
-      if (member.clientId === myClientIdRef.current) return;
+      const currentConnectionId = ablyClientRef.current?.connection.id;
+      if (
+        currentConnectionId
+          ? member.connectionId === currentConnectionId
+          : member.clientId === myClientIdRef.current
+      ) {
+        return;
+      }
 
-      const socketId = member.clientId as SocketId;
+      const socketId = (member.connectionId || member.clientId) as SocketId;
       if (member.action === "leave" || member.action === "absent") {
         collaboratorsRef.current.delete(socketId);
       } else {
         const data = member.data as PresenceData | undefined;
         if (data?.name) {
           collaboratorsRef.current.set(socketId, {
-            id: member.clientId,
+            id: member.connectionId || member.clientId,
             socketId,
             username: data.name,
             color: {
@@ -691,16 +708,23 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
     };
 
     const handlePresenceJoin = (member: Ably.PresenceMessage) => {
-      if (member.clientId === myClientIdRef.current) return;
+      const currentConnectionId = ablyClientRef.current?.connection.id;
+      if (
+        currentConnectionId
+          ? member.connectionId === currentConnectionId
+          : member.clientId === myClientIdRef.current
+      ) {
+        return;
+      }
 
       handlePresenceMessage(member);
       // Share our in-memory scene (fresher than what the DB may have) so the
-      // new member catches up immediately. Receivers ignore stale scenes via
-      // the scene-version guard, so broadcasting is safe even if we are not
-      // fully synced yet.
+      // new member catches up immediately. Bypass snapshot coalescing so joiners
+      // always receive the latest scene state.
       publishSceneRef.current(
         currentContentRef.current.elements,
         currentContentRef.current.appState,
+        true,
         true
       );
     };
@@ -710,8 +734,9 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
     };
 
     const applyScene = (data: SceneMessage) => {
-      // Ignore echoes and stale scenes (older than what we already have).
-      if (data.sceneVersion <= currentSceneVersionRef.current) return;
+      // Ignore stale full scene snapshots. For deltas (full === false), mergeSceneElements
+      // handles element-level version deduplication.
+      if (data.full && data.sceneVersion <= currentSceneVersionRef.current) return;
 
       const appState: SceneMessage["appState"] = {
         theme: data.appState?.theme,
