@@ -4,7 +4,7 @@ import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import LightModeIcon from "@mui/icons-material/LightMode";
 import DarkModeIcon from "@mui/icons-material/DarkMode";
 import Ably from "ably";
-import { Excalidraw, CaptureUpdateAction, getSceneVersion, UserIdleState } from "@excalidraw/excalidraw";
+import { Excalidraw, CaptureUpdateAction, getSceneVersion, UserIdleState, reconcileElements } from "@excalidraw/excalidraw";
 import type {
   AppState,
   Collaborator,
@@ -91,26 +91,6 @@ function splitElements(
   return parts;
 }
 
-/** Merges remote delta elements into the local scene, keeping the higher version. */
-function mergeSceneElements(
-  local: readonly ExcalidrawElement[],
-  remote: readonly ExcalidrawElement[]
-): ExcalidrawElement[] {
-  const byId = new Map<string, ExcalidrawElement>();
-  for (const element of local) byId.set(element.id, element);
-  for (const element of remote) {
-    const existing = byId.get(element.id);
-    if (
-      !existing ||
-      element.version > existing.version ||
-      (element.version === existing.version &&
-        element.versionNonce > existing.versionNonce)
-    ) {
-      byId.set(element.id, element);
-    }
-  }
-  return [...byId.values()];
-}
 
 const COLLAB_COLORS: CollabColor[] = [
   { background: "#f472b6", stroke: "#9d174d" },
@@ -174,6 +154,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
   const myPresenceRef = useRef<PresenceData | null>(null);
   const currentSceneVersionRef = useRef(0);
   const receivedSceneRef = useRef(false);
+  const isRemoteUpdateRef = useRef(false);
   const pendingRemoteSceneRef = useRef<CanvasContent | null>(null);
   const lastPointerPublishRef = useRef(0);
   const pointerIdleTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -729,10 +710,15 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         // Editor not mounted yet — keep the freshest full scene as the initial
         // scene, merging any deltas that arrive on top of it.
         const pending = pendingRemoteSceneRef.current;
+        const currentAppState = currentContentRef.current.appState;
         if (data.full) {
           pendingRemoteSceneRef.current = { elements: data.elements, appState };
         } else if (pending) {
-          pending.elements = mergeSceneElements(pending.elements, data.elements);
+          pending.elements = reconcileElements(
+            pending.elements as any,
+            data.elements as any,
+            currentAppState as any
+          ) as ExcalidrawElement[];
         }
         receivedSceneRef.current = true;
         return;
@@ -741,9 +727,14 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       receivedSceneRef.current = true;
 
       const localElements = currentContentRef.current.elements;
+      const currentAppState = excalidrawRef.current?.getAppState() || currentContentRef.current.appState;
       const nextElements = data.full
         ? data.elements
-        : mergeSceneElements(localElements, data.elements);
+        : (reconcileElements(
+            localElements as any,
+            data.elements as any,
+            currentAppState as any
+          ) as ExcalidrawElement[]);
       currentContentRef.current = {
         elements: nextElements,
         appState: currentContentRef.current.appState,
@@ -760,6 +751,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         broadcastedElementVersionsRef.current.set(element.id, element.version);
       }
 
+      isRemoteUpdateRef.current = true;
       excalidrawRef.current?.updateScene({
         elements: nextElements,
         appState: {
@@ -1165,6 +1157,11 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
     elements: readonly ExcalidrawElement[],
     appState: AppState
   ) => {
+    if (isRemoteUpdateRef.current) {
+      isRemoteUpdateRef.current = false;
+      return;
+    }
+
     currentContentRef.current = {
       elements: [...elements],
       appState,
