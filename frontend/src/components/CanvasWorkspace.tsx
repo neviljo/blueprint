@@ -77,7 +77,7 @@ const COLLAB_COLORS: CollabColor[] = [
 
 const POINTER_THROTTLE_MS = 50; // ~20fps smooth cursor stream
 const POINTER_IDLE_CLEAR_MS = 1500;
-const MAX_CHUNK_BYTES = 28000; // Stay conservatively under Ably's 64KB per-message limit
+const MAX_CHUNK_BYTES = 28000; // Stay conservatively under Ably's 64KB limit
 
 function colorForUser(id: string): CollabColor {
   let hash = 0;
@@ -170,7 +170,6 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       const rawElements = data.elements;
       const testJson = JSON.stringify(data);
 
-      // Fast path: small payloads (e.g. 1-10 modified elements from delta diffing)
       if (testJson.length <= MAX_CHUNK_BYTES) {
         encryptData(cryptoKeyRef.current, data).then((encrypted) => {
           channel.publish("collab", encrypted).catch((error) => {
@@ -180,7 +179,6 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         return;
       }
 
-      // Chunking path: slice large elements array into parts staying under 28KB
       const parts = splitElements(rawElements);
       const total = parts.length;
       const nonce = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -201,7 +199,6 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       return;
     }
 
-    // Small control messages (CURSOR_UPDATE, REQUEST_SCENE)
     encryptData(cryptoKeyRef.current, data).then((encrypted) => {
       channel.publish("collab", encrypted).catch((error) => {
         console.warn("[EXCALIDRAW] Failed to publish socket payload:", error);
@@ -331,7 +328,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
 
         if (disposed) return;
 
-        // 3. Initialize Ably WebSocket client (stateless zero-knowledge relay)
+        // 3. Initialize Ably WebSocket client
         const client = new Ably.Realtime({
           logLevel: 1,
           echoMessages: false,
@@ -376,7 +373,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         const channel = client.channels.get(`canvas:${canvasId}:collab`);
         channelRef.current = channel;
 
-        // Message handler following Excalidraw wire protocol
+        // Subscribe to real-time scene updates & cursors
         channel.subscribe("collab", async (message: Ably.Message) => {
           if (disposed || typeof message.data !== "string") return;
 
@@ -387,7 +384,6 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
           if (!payload || !payload.type) return;
 
           if (payload.type === "SCENE_UPDATE" || payload.type === "SCENE_RESPONSE") {
-            // Reassemble chunked scene parts if message was split
             if (payload.chunk) {
               const sender = payload.clientId || message.clientId || "unknown";
               const { index, total, nonce } = payload.chunk;
@@ -452,7 +448,6 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
               }
 
             } else if (payload.type === "SCENE_RESPONSE") {
-              // Joiner receives scene snapshot from existing peer
               currentContentRef.current.elements = payload.elements;
               payload.elements.forEach((el) => {
                 previousElementsMap.current.set(el.id, {
@@ -475,7 +470,6 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
             }
 
           } else if (payload.type === "REQUEST_SCENE") {
-            // Existing peer responds to joiner's scene request with full elements snapshot
             const currentElements = excalidrawRef.current?.getSceneElements() || currentContentRef.current.elements;
             if (currentElements.length > 0) {
               sendPayload({
@@ -488,15 +482,21 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
           } else if (payload.type === "CURSOR_UPDATE") {
             if (payload.clientId === myClientIdRef.current) return;
             const socketId = payload.clientId as SocketId;
+            const existing = collaboratorsRef.current.get(socketId);
 
             if (!payload.pointer) {
-              collaboratorsRef.current.delete(socketId);
+              if (existing) {
+                collaboratorsRef.current.set(socketId, {
+                  ...existing,
+                  pointer: undefined,
+                });
+              }
             } else {
               collaboratorsRef.current.set(socketId, {
                 id: payload.clientId,
                 socketId,
-                username: payload.username,
-                color: payload.color,
+                username: payload.username || existing?.username || "Collaborator",
+                color: payload.color || existing?.color || COLLAB_COLORS[0],
                 pointer: {
                   x: payload.pointer.x,
                   y: payload.pointer.y,
@@ -514,7 +514,58 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
           }
         });
 
+        // 5. Ably Presence for Room Member Avatars (low-frequency enter/leave)
+        channel.presence.subscribe((member) => {
+          if (member.clientId === myClientIdRef.current) return;
+          const socketId = member.clientId as SocketId;
+
+          if (member.action === "leave" || member.action === "absent") {
+            collaboratorsRef.current.delete(socketId);
+          } else if (member.action === "enter" || member.action === "present" || member.action === "update") {
+            const data = member.data as { username: string; color: CollabColor } | undefined;
+            if (data?.username) {
+              const existing = collaboratorsRef.current.get(socketId);
+              collaboratorsRef.current.set(socketId, {
+                id: member.clientId,
+                socketId,
+                username: data.username,
+                color: data.color || COLLAB_COLORS[0],
+                pointer: existing?.pointer,
+                userState: UserIdleState.ACTIVE,
+                button: "up",
+              });
+            }
+          }
+          const nextList = Array.from(collaboratorsRef.current.values());
+          setCollaboratorsList(nextList);
+          excalidrawRef.current?.updateScene({ collaborators: new Map(collaboratorsRef.current) });
+        });
+
         await channel.attach();
+
+        // Join presence once on room attach to share our name & color avatar
+        await channel.presence.enter({ username: userName, color });
+
+        // Query initial present room members to populate avatar stack instantly
+        const existingMembers = await channel.presence.get();
+        existingMembers.forEach((m) => {
+          if (m.clientId === myClientIdRef.current) return;
+          const data = m.data as { username: string; color: CollabColor } | undefined;
+          if (data?.username) {
+            const socketId = m.clientId as SocketId;
+            collaboratorsRef.current.set(socketId, {
+              id: m.clientId,
+              socketId,
+              username: data.username,
+              color: data.color || COLLAB_COLORS[0],
+              pointer: undefined,
+              userState: UserIdleState.ACTIVE,
+              button: "up",
+            });
+          }
+        });
+        setCollaboratorsList(Array.from(collaboratorsRef.current.values()));
+        excalidrawRef.current?.updateScene({ collaborators: new Map(collaboratorsRef.current) });
 
         // Send initial REQUEST_SCENE to active peers in the room
         sendPayload({
@@ -550,6 +601,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       ablyClientRef.current = null;
 
       if (channel) {
+        channel.presence.leave().catch(() => undefined);
         channel.unsubscribe();
         channel.detach().catch(() => undefined);
       }
