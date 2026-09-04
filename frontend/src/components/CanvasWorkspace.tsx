@@ -76,6 +76,7 @@ const COLLAB_COLORS: CollabColor[] = [
 ];
 
 const POINTER_THROTTLE_MS = 50; // ~20fps smooth cursor stream
+const SCENE_BROADCAST_THROTTLE_MS = 50; // Max 20 msgs/sec for live strokes
 const POINTER_IDLE_CLEAR_MS = 1500;
 const MAX_CHUNK_BYTES = 28000; // Stay conservatively under Ably's 64KB limit
 
@@ -124,6 +125,8 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
 
   const navigate = useNavigate();
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sceneBroadcastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastSceneBroadcastRef = useRef(0);
   const excalidrawRef = useRef<ExcalidrawImperativeAPI>(null);
   const currentContentRef = useRef<CanvasContent>({
     elements: [],
@@ -136,6 +139,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
   const myClientIdRef = useRef<string | null>(null);
   const isRemoteUpdateRef = useRef(false);
   const previousElementsMap = useRef<Map<string, { version: number; versionNonce: number }>>(new Map());
+  const pendingBroadcastElementsRef = useRef<Map<string, ExcalidrawElement>>(new Map());
   const collaboratorsRef = useRef<Map<SocketId, Collaborator>>(new Map());
   const sceneChunksRef = useRef<
     Map<
@@ -373,8 +377,8 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         const channel = client.channels.get(`canvas:${canvasId}:collab`);
         channelRef.current = channel;
 
-        // Subscribe to real-time scene updates & cursors
-        channel.subscribe("collab", async (message: Ably.Message) => {
+        // Subscribe to all channel messages (handles both named and direct payloads)
+        channel.subscribe(async (message: Ably.Message) => {
           if (disposed || typeof message.data !== "string") return;
 
           const payload = await decryptData<SocketPayload>(
@@ -443,6 +447,10 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
                 captureUpdate: CaptureUpdateAction.NEVER,
               });
 
+              setTimeout(() => {
+                isRemoteUpdateRef.current = false;
+              }, 50);
+
               if (payload.appState?.theme === "light" || payload.appState?.theme === "dark") {
                 setEditorTheme(payload.appState.theme);
               }
@@ -463,6 +471,10 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
                 collaborators: new Map(collaboratorsRef.current),
                 captureUpdate: CaptureUpdateAction.NEVER,
               });
+
+              setTimeout(() => {
+                isRemoteUpdateRef.current = false;
+              }, 50);
 
               if (payload.appState?.theme === "light" || payload.appState?.theme === "dark") {
                 setEditorTheme(payload.appState.theme);
@@ -589,10 +601,15 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       collaboratorsRef.current.clear();
       setCollaboratorsList([]);
       sceneChunksRef.current.clear();
+      pendingBroadcastElementsRef.current.clear();
 
       if (pointerIdleTimeoutRef.current) {
         clearTimeout(pointerIdleTimeoutRef.current);
         pointerIdleTimeoutRef.current = null;
+      }
+      if (sceneBroadcastTimeoutRef.current) {
+        clearTimeout(sceneBroadcastTimeoutRef.current);
+        sceneBroadcastTimeoutRef.current = null;
       }
 
       const channel = channelRef.current;
@@ -610,13 +627,26 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
     };
   }, [canvasId, sendPayload]);
 
-  // Excalidraw Drawing Changes (delta diff check -> publish changed elements -> debounced DB save)
+  const broadcastSceneUpdate = useCallback(
+    (changedElements: ExcalidrawElement[], appState: AppState) => {
+      sendPayload({
+        type: "SCENE_UPDATE",
+        elements: changedElements,
+        appState: {
+          theme: appState.theme,
+          viewBackgroundColor: appState.viewBackgroundColor,
+        },
+      });
+    },
+    [sendPayload]
+  );
+
+  // Excalidraw Drawing Changes (throttled delta diff check -> publish changed elements -> debounced DB save)
   const handleChange = (
     elements: readonly ExcalidrawElement[],
     appState: AppState
   ) => {
     if (isRemoteUpdateRef.current) {
-      isRemoteUpdateRef.current = false;
       return;
     }
 
@@ -627,7 +657,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
 
     setEditorTheme(appState.theme === "light" ? "light" : "dark");
 
-    // Strict delta diffing: broadcast ONLY modified elements (keeps messages ~500 bytes)
+    // Strict delta diffing: broadcast ONLY modified elements
     const changedElements: ExcalidrawElement[] = [];
     elements.forEach((el) => {
       const prev = previousElementsMap.current.get(el.id);
@@ -645,14 +675,38 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
     });
 
     if (changedElements.length > 0) {
-      sendPayload({
-        type: "SCENE_UPDATE",
-        elements: changedElements,
-        appState: {
-          theme: appState.theme,
-          viewBackgroundColor: appState.viewBackgroundColor,
-        },
+      // Accumulate all changed elements into the pending map (keyed by id so
+      // newer versions overwrite older ones between throttle windows)
+      changedElements.forEach((el) => {
+        pendingBroadcastElementsRef.current.set(el.id, el);
       });
+
+      const now = Date.now();
+      if (now - lastSceneBroadcastRef.current >= SCENE_BROADCAST_THROTTLE_MS) {
+        // Enough time has passed — flush immediately
+        lastSceneBroadcastRef.current = now;
+        if (sceneBroadcastTimeoutRef.current) {
+          clearTimeout(sceneBroadcastTimeoutRef.current);
+          sceneBroadcastTimeoutRef.current = null;
+        }
+        const toSend = Array.from(pendingBroadcastElementsRef.current.values());
+        pendingBroadcastElementsRef.current.clear();
+        broadcastSceneUpdate(toSend, appState);
+      } else {
+        // Schedule trailing flush to catch the final state
+        if (sceneBroadcastTimeoutRef.current) {
+          clearTimeout(sceneBroadcastTimeoutRef.current);
+        }
+        sceneBroadcastTimeoutRef.current = setTimeout(() => {
+          sceneBroadcastTimeoutRef.current = null;
+          lastSceneBroadcastRef.current = Date.now();
+          const toSend = Array.from(pendingBroadcastElementsRef.current.values());
+          pendingBroadcastElementsRef.current.clear();
+          if (toSend.length > 0) {
+            broadcastSceneUpdate(toSend, appState);
+          }
+        }, 60);
+      }
     }
 
     // Debounced database backup save
