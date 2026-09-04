@@ -33,11 +33,19 @@ interface CollabPointer {
   tool: "pointer" | "laser";
 }
 
+interface ChunkMeta {
+  index: number;
+  total: number;
+  nonce: string;
+}
+
 type SocketPayload =
   | {
       type: "SCENE_UPDATE";
+      clientId?: string;
       elements: ExcalidrawElement[];
       appState?: Partial<AppState>;
+      chunk?: ChunkMeta;
     }
   | {
       type: "REQUEST_SCENE";
@@ -45,8 +53,10 @@ type SocketPayload =
     }
   | {
       type: "SCENE_RESPONSE";
+      clientId?: string;
       elements: ExcalidrawElement[];
       appState?: Partial<AppState>;
+      chunk?: ChunkMeta;
     }
   | {
       type: "CURSOR_UPDATE";
@@ -67,6 +77,7 @@ const COLLAB_COLORS: CollabColor[] = [
 
 const POINTER_THROTTLE_MS = 50; // ~20fps smooth cursor stream
 const POINTER_IDLE_CLEAR_MS = 1500;
+const MAX_CHUNK_BYTES = 28000; // Stay conservatively under Ably's 64KB per-message limit
 
 function colorForUser(id: string): CollabColor {
   let hash = 0;
@@ -74,6 +85,30 @@ function colorForUser(id: string): CollabColor {
     hash = (hash * 31 + id.charCodeAt(i)) | 0;
   }
   return COLLAB_COLORS[Math.abs(hash) % COLLAB_COLORS.length];
+}
+
+/** Splits elements array into sub-chunks staying under per-message byte budget */
+function splitElements(elements: readonly ExcalidrawElement[]): ExcalidrawElement[][] {
+  const parts: ExcalidrawElement[][] = [];
+  let currentPart: ExcalidrawElement[] = [];
+  let currentBytes = 0;
+
+  for (const element of elements) {
+    const elementBytes = new TextEncoder().encode(JSON.stringify(element)).length;
+    if (currentPart.length > 0 && currentBytes + elementBytes > MAX_CHUNK_BYTES) {
+      parts.push(currentPart);
+      currentPart = [element];
+      currentBytes = elementBytes;
+    } else {
+      currentPart.push(element);
+      currentBytes += elementBytes;
+    }
+  }
+  if (currentPart.length > 0) {
+    parts.push(currentPart);
+  }
+
+  return parts;
 }
 
 export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
@@ -102,6 +137,18 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
   const isRemoteUpdateRef = useRef(false);
   const previousElementsMap = useRef<Map<string, { version: number; versionNonce: number }>>(new Map());
   const collaboratorsRef = useRef<Map<SocketId, Collaborator>>(new Map());
+  const sceneChunksRef = useRef<
+    Map<
+      string,
+      {
+        nonce: string;
+        total: number;
+        parts: Map<number, ExcalidrawElement[]>;
+        appState?: Partial<AppState>;
+        type: "SCENE_UPDATE" | "SCENE_RESPONSE";
+      }
+    >
+  >(new Map());
 
   const lastPointerPublishRef = useRef(0);
   const pointerIdleTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -112,16 +159,54 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
     color: COLLAB_COLORS[0],
   });
 
-  // Encrypts and publishes socket payload to room peers
+  // Encrypts and publishes socket payloads (with chunking for large snapshots)
   const sendPayload = useCallback((data: SocketPayload) => {
     const channel = channelRef.current;
-    if (channel && channel.state === "attached") {
-      encryptData(cryptoKeyRef.current, data).then((encrypted) => {
-        channel.publish("collab", encrypted).catch((error) => {
-          console.warn("[EXCALIDRAW] Failed to broadcast socket payload:", error);
+    if (!channel || channel.state !== "attached") return;
+
+    data.clientId = myClientIdRef.current || undefined;
+
+    if (data.type === "SCENE_UPDATE" || data.type === "SCENE_RESPONSE") {
+      const rawElements = data.elements;
+      const testJson = JSON.stringify(data);
+
+      // Fast path: small payloads (e.g. 1-10 modified elements from delta diffing)
+      if (testJson.length <= MAX_CHUNK_BYTES) {
+        encryptData(cryptoKeyRef.current, data).then((encrypted) => {
+          channel.publish("collab", encrypted).catch((error) => {
+            console.warn("[EXCALIDRAW] Failed to publish socket payload:", error);
+          });
+        });
+        return;
+      }
+
+      // Chunking path: slice large elements array into parts staying under 28KB
+      const parts = splitElements(rawElements);
+      const total = parts.length;
+      const nonce = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+      parts.forEach((partElements, index) => {
+        const chunkPayload: SocketPayload = {
+          ...data,
+          elements: partElements,
+          appState: index === total - 1 ? data.appState : undefined,
+          chunk: { index, total, nonce },
+        };
+        encryptData(cryptoKeyRef.current, chunkPayload).then((encrypted) => {
+          channel.publish("collab", encrypted).catch((error) => {
+            console.warn("[EXCALIDRAW] Failed to publish chunk payload:", error);
+          });
         });
       });
+      return;
     }
+
+    // Small control messages (CURSOR_UPDATE, REQUEST_SCENE)
+    encryptData(cryptoKeyRef.current, data).then((encrypted) => {
+      channel.publish("collab", encrypted).catch((error) => {
+        console.warn("[EXCALIDRAW] Failed to publish socket payload:", error);
+      });
+    });
   }, []);
 
   // Save content to backend database API as a debounced backup
@@ -301,38 +386,96 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
           );
           if (!payload || !payload.type) return;
 
-          if (payload.type === "SCENE_UPDATE" && payload.elements) {
-            const localElements = excalidrawRef.current?.getSceneElements() || currentContentRef.current.elements;
-            const currentAppState = excalidrawRef.current?.getAppState() || currentContentRef.current.appState;
+          if (payload.type === "SCENE_UPDATE" || payload.type === "SCENE_RESPONSE") {
+            // Reassemble chunked scene parts if message was split
+            if (payload.chunk) {
+              const sender = payload.clientId || message.clientId || "unknown";
+              const { index, total, nonce } = payload.chunk;
+              let buffer = sceneChunksRef.current.get(sender);
 
-            const reconciled = reconcileElements(
-              localElements as any,
-              payload.elements as any,
-              currentAppState as any
-            ) as ExcalidrawElement[];
+              if (!buffer || buffer.nonce !== nonce) {
+                buffer = {
+                  nonce,
+                  total,
+                  parts: new Map(),
+                  appState: payload.appState,
+                  type: payload.type,
+                };
+                sceneChunksRef.current.set(sender, buffer);
+              }
 
-            currentContentRef.current.elements = reconciled;
-            reconciled.forEach((el) => {
-              previousElementsMap.current.set(el.id, {
-                version: el.version,
-                versionNonce: el.versionNonce,
+              buffer.parts.set(index, payload.elements);
+              if (payload.appState) buffer.appState = payload.appState;
+
+              if (buffer.parts.size < total) return;
+
+              sceneChunksRef.current.delete(sender);
+
+              const assembled: ExcalidrawElement[] = [];
+              for (let i = 0; i < total; i++) {
+                const part = buffer.parts.get(i);
+                if (!part) return;
+                assembled.push(...part);
+              }
+              payload.elements = assembled;
+              if (buffer.appState) payload.appState = buffer.appState;
+            }
+
+            if (payload.type === "SCENE_UPDATE") {
+              const localElements = excalidrawRef.current?.getSceneElements() || currentContentRef.current.elements;
+              const currentAppState = excalidrawRef.current?.getAppState() || currentContentRef.current.appState;
+
+              const reconciled = reconcileElements(
+                localElements as any,
+                payload.elements as any,
+                currentAppState as any
+              ) as ExcalidrawElement[];
+
+              currentContentRef.current.elements = reconciled;
+              reconciled.forEach((el) => {
+                previousElementsMap.current.set(el.id, {
+                  version: el.version,
+                  versionNonce: el.versionNonce,
+                });
               });
-            });
 
-            isRemoteUpdateRef.current = true;
-            excalidrawRef.current?.updateScene({
-              elements: reconciled,
-              appState: payload.appState?.theme ? { theme: payload.appState.theme } : undefined,
-              collaborators: new Map(collaboratorsRef.current),
-              captureUpdate: CaptureUpdateAction.NEVER,
-            });
+              isRemoteUpdateRef.current = true;
+              excalidrawRef.current?.updateScene({
+                elements: reconciled,
+                appState: payload.appState?.theme ? { theme: payload.appState.theme } : undefined,
+                collaborators: new Map(collaboratorsRef.current),
+                captureUpdate: CaptureUpdateAction.NEVER,
+              });
 
-            if (payload.appState?.theme === "light" || payload.appState?.theme === "dark") {
-              setEditorTheme(payload.appState.theme);
+              if (payload.appState?.theme === "light" || payload.appState?.theme === "dark") {
+                setEditorTheme(payload.appState.theme);
+              }
+
+            } else if (payload.type === "SCENE_RESPONSE") {
+              // Joiner receives scene snapshot from existing peer
+              currentContentRef.current.elements = payload.elements;
+              payload.elements.forEach((el) => {
+                previousElementsMap.current.set(el.id, {
+                  version: el.version,
+                  versionNonce: el.versionNonce,
+                });
+              });
+
+              isRemoteUpdateRef.current = true;
+              excalidrawRef.current?.updateScene({
+                elements: payload.elements,
+                appState: payload.appState?.theme ? { theme: payload.appState.theme } : undefined,
+                collaborators: new Map(collaboratorsRef.current),
+                captureUpdate: CaptureUpdateAction.NEVER,
+              });
+
+              if (payload.appState?.theme === "light" || payload.appState?.theme === "dark") {
+                setEditorTheme(payload.appState.theme);
+              }
             }
 
           } else if (payload.type === "REQUEST_SCENE") {
-            // Existing peer responds to joiner's scene request
+            // Existing peer responds to joiner's scene request with full elements snapshot
             const currentElements = excalidrawRef.current?.getSceneElements() || currentContentRef.current.elements;
             if (currentElements.length > 0) {
               sendPayload({
@@ -340,28 +483,6 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
                 elements: [...currentElements],
                 appState: excalidrawRef.current?.getAppState() || currentContentRef.current.appState,
               });
-            }
-
-          } else if (payload.type === "SCENE_RESPONSE" && payload.elements) {
-            // Joiner receives scene snapshot from existing peer
-            currentContentRef.current.elements = payload.elements;
-            payload.elements.forEach((el) => {
-              previousElementsMap.current.set(el.id, {
-                version: el.version,
-                versionNonce: el.versionNonce,
-              });
-            });
-
-            isRemoteUpdateRef.current = true;
-            excalidrawRef.current?.updateScene({
-              elements: payload.elements,
-              appState: payload.appState?.theme ? { theme: payload.appState.theme } : undefined,
-              collaborators: new Map(collaboratorsRef.current),
-              captureUpdate: CaptureUpdateAction.NEVER,
-            });
-
-            if (payload.appState?.theme === "light" || payload.appState?.theme === "dark") {
-              setEditorTheme(payload.appState.theme);
             }
 
           } else if (payload.type === "CURSOR_UPDATE") {
@@ -416,6 +537,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       setIsCollaborating(false);
       collaboratorsRef.current.clear();
       setCollaboratorsList([]);
+      sceneChunksRef.current.clear();
 
       if (pointerIdleTimeoutRef.current) {
         clearTimeout(pointerIdleTimeoutRef.current);
@@ -436,7 +558,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
     };
   }, [canvasId, sendPayload]);
 
-  // Excalidraw Drawing Changes (diff check -> publish SCENE_UPDATE -> debounced DB save)
+  // Excalidraw Drawing Changes (delta diff check -> publish changed elements -> debounced DB save)
   const handleChange = (
     elements: readonly ExcalidrawElement[],
     appState: AppState
@@ -453,8 +575,8 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
 
     setEditorTheme(appState.theme === "light" ? "light" : "dark");
 
-    // Track element version/versionNonce diffs to prevent echoing unchanged elements
-    let hasChanges = false;
+    // Strict delta diffing: broadcast ONLY modified elements (keeps messages ~500 bytes)
+    const changedElements: ExcalidrawElement[] = [];
     elements.forEach((el) => {
       const prev = previousElementsMap.current.get(el.id);
       if (
@@ -462,7 +584,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         prev.version !== el.version ||
         prev.versionNonce !== el.versionNonce
       ) {
-        hasChanges = true;
+        changedElements.push(el);
       }
       previousElementsMap.current.set(el.id, {
         version: el.version,
@@ -470,10 +592,10 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       });
     });
 
-    if (hasChanges) {
+    if (changedElements.length > 0) {
       sendPayload({
         type: "SCENE_UPDATE",
-        elements: [...elements],
+        elements: changedElements,
         appState: {
           theme: appState.theme,
           viewBackgroundColor: appState.viewBackgroundColor,
