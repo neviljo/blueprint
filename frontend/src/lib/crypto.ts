@@ -3,9 +3,18 @@
  * Matching official Excalidraw zero-knowledge specification.
  */
 
+/**
+ * Converts ArrayBuffer or Uint8Array to base64 string without exceeding
+ * call stack size limits on large canvas element payloads.
+ */
 function bufferToBase64(buf: ArrayBuffer | Uint8Array): string {
   const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
-  return btoa(String.fromCharCode(...bytes))
+  let binary = "";
+  const len = bytes.byteLength;
+  for (let i = 0; i < len; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary)
     .replace(/\+/g, "-")
     .replace(/\//g, "_")
     .replace(/=+$/, "");
@@ -44,7 +53,6 @@ export async function importKey(keyStr: string): Promise<CryptoKey | null> {
       ["encrypt", "decrypt"]
     );
   } catch (err) {
-    console.error("Failed to import crypto key:", err);
     return null;
   }
 }
@@ -83,20 +91,27 @@ export async function decryptData<T = any>(
   }
 
   try {
-    const { iv, ciphertext } = JSON.parse(encryptedStr);
-    if (!iv || !ciphertext) {
-      // Fallback if raw unencrypted string
-      return JSON.parse(encryptedStr) as T;
+    let parsed: any;
+    try {
+      parsed = JSON.parse(encryptedStr);
+    } catch {
+      return null;
     }
+
+    if (!parsed || typeof parsed !== "object" || !parsed.iv || !parsed.ciphertext) {
+      // Unencrypted payload fallback
+      return parsed as T;
+    }
+
     const decrypted = await window.crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: new Uint8Array(base64ToBuffer(iv)) },
+      { name: "AES-GCM", iv: new Uint8Array(base64ToBuffer(parsed.iv)) },
       key,
-      base64ToBuffer(ciphertext)
+      base64ToBuffer(parsed.ciphertext)
     );
     const decoded = new TextDecoder().decode(decrypted);
     return JSON.parse(decoded) as T;
-  } catch (err) {
-    console.error("Failed to decrypt socket payload:", err);
+  } catch {
+    // Suppress stack trace on key mismatch or invalid payload
     return null;
   }
 }

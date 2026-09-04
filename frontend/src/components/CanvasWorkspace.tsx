@@ -218,13 +218,20 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
 
     async function setupRealtime() {
       try {
-        // 1. E2EE URL Hash Parsing (#room=<canvasId>,<key>)
+        // 1. E2EE URL Hash & LocalStorage Key Consistency (#room=<canvasId>,<key>)
         let keyStr: string | undefined;
         const hashMatch = window.location.hash.slice(1).match(/room=([^,]+),(.+)/);
         if (hashMatch && hashMatch[1] === canvasId) {
           keyStr = hashMatch[2];
+          localStorage.setItem(`canvas_key_${canvasId}`, keyStr);
         } else {
-          keyStr = await generateKey();
+          const stored = localStorage.getItem(`canvas_key_${canvasId}`);
+          if (stored) {
+            keyStr = stored;
+          } else {
+            keyStr = await generateKey();
+            localStorage.setItem(`canvas_key_${canvasId}`, keyStr);
+          }
           window.location.hash = `room=${canvasId},${keyStr}`;
         }
         cryptoKeyRef.current = await importKey(keyStr);
