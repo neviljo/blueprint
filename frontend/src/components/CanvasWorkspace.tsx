@@ -16,7 +16,6 @@ import { useNavigate } from "@tanstack/react-router";
 import { canvasApi } from "../lib/api";
 import type { CanvasContent } from "../lib/types";
 import { getCurrentSession } from "../lib/auth";
-import { generateKey, importKey, encryptData, decryptData } from "../lib/crypto";
 
 interface CanvasWorkspaceProps {
   canvasId: string;
@@ -135,7 +134,6 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
 
   const ablyClientRef = useRef<Ably.Realtime | null>(null);
   const channelRef = useRef<Ably.RealtimeChannel | null>(null);
-  const cryptoKeyRef = useRef<CryptoKey | null>(null);
   const myClientIdRef = useRef<string | null>(null);
   const isRemoteUpdateRef = useRef(false);
   const previousElementsMap = useRef<Map<string, { version: number; versionNonce: number }>>(new Map());
@@ -163,10 +161,13 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
     color: COLLAB_COLORS[0],
   });
 
-  // Encrypts and publishes socket payloads (with chunking for large snapshots)
+  // Serializes and publishes socket payloads (with chunking for large snapshots)
   const sendPayload = useCallback((data: SocketPayload) => {
     const channel = channelRef.current;
-    if (!channel || channel.state !== "attached") return;
+    if (!channel || channel.state !== "attached") {
+      console.debug("[COLLAB] sendPayload skipped — channel not attached, state:", channel?.state);
+      return;
+    }
 
     data.clientId = myClientIdRef.current || undefined;
 
@@ -175,14 +176,13 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       const testJson = JSON.stringify(data);
 
       if (testJson.length <= MAX_CHUNK_BYTES) {
-        encryptData(cryptoKeyRef.current, data).then((encrypted) => {
-          channel.publish("collab", encrypted).catch((error) => {
-            console.warn("[EXCALIDRAW] Failed to publish socket payload:", error);
-          });
+        channel.publish("collab", testJson).catch((error) => {
+          console.warn("[COLLAB] Failed to publish payload:", error);
         });
         return;
       }
 
+      // Split large canvas snapshots into sub-chunks staying under Ably's limit
       const parts = splitElements(rawElements);
       const total = parts.length;
       const nonce = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -194,19 +194,15 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
           appState: index === total - 1 ? data.appState : undefined,
           chunk: { index, total, nonce },
         };
-        encryptData(cryptoKeyRef.current, chunkPayload).then((encrypted) => {
-          channel.publish("collab", encrypted).catch((error) => {
-            console.warn("[EXCALIDRAW] Failed to publish chunk payload:", error);
-          });
+        channel.publish("collab", JSON.stringify(chunkPayload)).catch((error) => {
+          console.warn("[COLLAB] Failed to publish chunk:", error);
         });
       });
       return;
     }
 
-    encryptData(cryptoKeyRef.current, data).then((encrypted) => {
-      channel.publish("collab", encrypted).catch((error) => {
-        console.warn("[EXCALIDRAW] Failed to publish socket payload:", error);
-      });
+    channel.publish("collab", JSON.stringify(data)).catch((error) => {
+      console.warn("[COLLAB] Failed to publish payload:", error);
     });
   }, []);
 
@@ -304,25 +300,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
 
     async function setupRealtime() {
       try {
-        // 1. E2EE URL Hash & LocalStorage Key Consistency (#room=<canvasId>,<key>)
-        let keyStr: string | undefined;
-        const hashMatch = window.location.hash.slice(1).match(/room=([^,]+),(.+)/);
-        if (hashMatch && hashMatch[1] === canvasId) {
-          keyStr = hashMatch[2];
-          localStorage.setItem(`canvas_key_${canvasId}`, keyStr);
-        } else {
-          const stored = localStorage.getItem(`canvas_key_${canvasId}`);
-          if (stored) {
-            keyStr = stored;
-          } else {
-            keyStr = await generateKey();
-            localStorage.setItem(`canvas_key_${canvasId}`, keyStr);
-          }
-          window.location.hash = `room=${canvasId},${keyStr}`;
-        }
-        cryptoKeyRef.current = await importKey(keyStr);
-
-        // 2. Auth Session & User Profile
+        // 1. Auth Session & User Profile
         const session = await getCurrentSession();
         const userName = session.user?.name || session.user?.email || "Anonymous";
         const userId = session.user?.id || "anonymous";
@@ -332,7 +310,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
 
         if (disposed) return;
 
-        // 3. Initialize Ably WebSocket client
+        // 2. Initialize Ably WebSocket client with server-side token auth
         const client = new Ably.Realtime({
           logLevel: 1,
           echoMessages: false,
@@ -361,6 +339,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
               break;
             case "failed":
               setCollabStatus("offline");
+              console.warn("[COLLAB] Connection failed:", stateChange.reason);
               break;
           }
         });
@@ -372,19 +351,23 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         }
 
         myClientIdRef.current = client.clientId;
+        console.info("[COLLAB] Connected. clientId:", client.clientId);
 
-        // 4. Attach to room channel
+        // 3. Attach to canvas room channel
         const channel = client.channels.get(`canvas:${canvasId}:collab`);
         channelRef.current = channel;
 
-        // Subscribe to all channel messages (handles both named and direct payloads)
-        channel.subscribe(async (message: Ably.Message) => {
+        // Subscribe to all collab messages
+        channel.subscribe((message: Ably.Message) => {
           if (disposed || typeof message.data !== "string") return;
 
-          const payload = await decryptData<SocketPayload>(
-            cryptoKeyRef.current,
-            message.data
-          );
+          let payload: SocketPayload | null = null;
+          try {
+            payload = JSON.parse(message.data) as SocketPayload;
+          } catch {
+            console.warn("[COLLAB] Failed to parse message:", message.data);
+            return;
+          }
           if (!payload || !payload.type) return;
 
           if (payload.type === "SCENE_UPDATE" || payload.type === "SCENE_RESPONSE") {
