@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Box, IconButton, Tooltip, CircularProgress, Avatar, AvatarGroup, Typography, Divider } from "@mui/material";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
+import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import LightModeIcon from "@mui/icons-material/LightMode";
 import DarkModeIcon from "@mui/icons-material/DarkMode";
 import Ably from "ably";
@@ -848,6 +849,34 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         </IconButton>
       </Tooltip>
 
+      <Tooltip title="AI">
+        <IconButton
+          onClick={() => {
+            const api = excalidrawRef.current;
+            if (!api) return;
+            const open = api.getAppState().openSidebar;
+            api.updateScene({
+              appState: {
+                openSidebar: open?.name === "ai" ? null : { name: "ai", tab: "chat" },
+              },
+            });
+          }}
+          sx={{
+            position: "absolute",
+            top: 16,
+            right: 16,
+            zIndex: 11,
+            color: "#A6A6A6",
+            bgcolor: "rgba(18, 18, 18, 0.8)",
+            border: "1px solid #1f1f1f",
+            "&:hover": { color: "#ECECEC", bgcolor: "#27272A" },
+          }}
+          size="small"
+        >
+          <AutoAwesomeIcon fontSize="small" />
+        </IconButton>
+      </Tooltip>
+
       {/* Floating Theme Toggle */}
       <Tooltip title={isLight ? "Switch to dark mode" : "Switch to light mode"}>
         <IconButton
@@ -877,7 +906,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         sx={{
           position: "absolute",
           top: 14,
-          right: 16,
+          right: 64,
           zIndex: 10,
           display: "flex",
           alignItems: "center",
@@ -1049,17 +1078,6 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
                 </Sidebar.Tab>
               </Sidebar.Tabs>
             </Sidebar>
-            <Sidebar.Trigger
-              name="ai"
-              tab="chat"
-              title="AI"
-              icon={
-                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.8">
-                  <path d="M12 3l1.2 3.8L17 8l-3.8 1.2L12 13l-1.2-3.8L7 8l3.8-1.2L12 3z" />
-                  <path d="M18 13l.7 2.1L21 16l-2.3.7L18 19l-.7-2.3L15 16l2.3-.9L18 13z" />
-                </svg>
-              }
-            />
           </Excalidraw>
         )}
       </Box>
