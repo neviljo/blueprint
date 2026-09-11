@@ -5,6 +5,7 @@ import { auth } from "./modules/auth/auth.js";
 import { HttpError } from "./modules/errors.js";
 import workspaceRoutes from "./modules/workspaces/routes.js";
 import canvasRoutes from "./modules/canvases/routes.js";
+import aiRoutes from "./modules/ai/routes.js";
 
 const origin = process.env.CLIENT_ORIGIN ?? process.env.BETTER_AUTH_URL ?? "http://localhost:5173";
 
@@ -37,6 +38,7 @@ app.on(["GET", "POST"], "/api/auth/*", (c) => {
 
 app.route("/api/workspaces", workspaceRoutes);
 app.route("/api/canvases", canvasRoutes);
+app.route("/api/ai", aiRoutes);
 app.get("/health", (c) => {
   return c.json({
     success: true,

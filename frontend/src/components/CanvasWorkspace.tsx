@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Box, IconButton, Tooltip, CircularProgress, Avatar, AvatarGroup, Typography, Divider } from "@mui/material";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
+import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import LightModeIcon from "@mui/icons-material/LightMode";
 import DarkModeIcon from "@mui/icons-material/DarkMode";
 import Ably from "ably";
@@ -16,6 +17,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { canvasApi } from "../lib/api";
 import type { CanvasContent } from "../lib/types";
 import { getCurrentSession } from "../lib/auth";
+import AiPanel from "./AiPanel";
 
 interface CanvasWorkspaceProps {
   canvasId: string;
@@ -107,6 +109,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
   const [initialData, setInitialData] = useState<CanvasContent | null>(null);
   const [workspaceId, setWorkspaceId] = useState<string | null>(null);
   const [editorTheme, setEditorTheme] = useState<"dark" | "light">("dark");
+  const [aiOpen, setAiOpen] = useState(false);
   const [isCollaborating, setIsCollaborating] = useState(false);
   const [collabStatus, setCollabStatus] = useState<
     "connecting" | "live" | "reconnecting" | "offline"
@@ -838,6 +841,25 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         </IconButton>
       </Tooltip>
 
+      <Tooltip title="AI">
+        <IconButton
+          onClick={() => setAiOpen(true)}
+          sx={{
+            position: "absolute",
+            top: 16,
+            left: 152,
+            zIndex: 10,
+            color: "#A6A6A6",
+            bgcolor: "rgba(18, 18, 18, 0.8)",
+            border: "1px solid #1f1f1f",
+            "&:hover": { color: "#ECECEC", bgcolor: "#27272A" },
+          }}
+          size="small"
+        >
+          <AutoAwesomeIcon fontSize="small" />
+        </IconButton>
+      </Tooltip>
+
       {/* Floating Theme Toggle */}
       <Tooltip title={isLight ? "Switch to dark mode" : "Switch to light mode"}>
         <IconButton
@@ -1007,6 +1029,11 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
           />
         )}
       </Box>
+      <AiPanel
+        open={aiOpen}
+        onClose={() => setAiOpen(false)}
+        getApi={() => excalidrawRef.current}
+      />
     </Box>
   );
 }
