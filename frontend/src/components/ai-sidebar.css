@@ -1,0 +1,92 @@
+.blueprint-ai-sidebar {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  font-size: 0.8125rem;
+}
+
+.blueprint-ai-sidebar__body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.blueprint-ai-sidebar textarea,
+.blueprint-ai-sidebar input[type="text"] {
+  width: 100%;
+  resize: vertical;
+  border: 1px solid var(--color-gray-20);
+  border-radius: 0.5rem;
+  padding: 0.55rem 0.65rem;
+  background: var(--island-bg-color);
+  color: var(--text-primary-color);
+  font: inherit;
+}
+
+.blueprint-ai-sidebar button.blueprint-ai-btn {
+  border: 0;
+  border-radius: 0.5rem;
+  padding: 0.45rem 0.75rem;
+  background: var(--color-primary);
+  color: var(--color-surface-lowest);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.blueprint-ai-sidebar button.blueprint-ai-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.blueprint-ai-sidebar button.blueprint-ai-btn--ghost {
+  background: transparent;
+  color: var(--color-primary);
+  border: 1px solid var(--color-primary);
+}
+
+.blueprint-ai-sidebar__error {
+  color: var(--color-danger);
+}
+
+.blueprint-ai-sidebar__hint {
+  color: var(--color-gray-40);
+}
+
+.blueprint-ai-sidebar__chat {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-height: 0;
+}
+
+.blueprint-ai-sidebar__bubble {
+  border-radius: 0.65rem;
+  padding: 0.5rem 0.65rem;
+  max-width: 95%;
+  background: var(--button-hover-bg);
+}
+
+.blueprint-ai-sidebar__bubble--user {
+  align-self: flex-end;
+  background: var(--color-primary-light);
+}
+
+.blueprint-ai-sidebar__actions {
+  display: flex;
+  gap: 0.4rem;
+  margin-top: 0.45rem;
+}
+
+.blueprint-ai-sidebar label.blueprint-ai-check {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--text-primary-color);
+}

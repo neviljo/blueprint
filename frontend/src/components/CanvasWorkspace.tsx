@@ -1,11 +1,18 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Box, IconButton, Tooltip, CircularProgress, Avatar, AvatarGroup, Typography, Divider } from "@mui/material";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
-import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import LightModeIcon from "@mui/icons-material/LightMode";
 import DarkModeIcon from "@mui/icons-material/DarkMode";
 import Ably from "ably";
-import { Excalidraw, CaptureUpdateAction, UserIdleState, reconcileElements } from "@excalidraw/excalidraw";
+import {
+  Excalidraw,
+  CaptureUpdateAction,
+  UserIdleState,
+  reconcileElements,
+  Sidebar,
+  TTDDialog,
+  TTDDialogTrigger,
+} from "@excalidraw/excalidraw";
 import type {
   AppState,
   Collaborator,
@@ -17,6 +24,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { canvasApi } from "../lib/api";
 import type { CanvasContent } from "../lib/types";
 import { getCurrentSession } from "../lib/auth";
+import { generateDiagram } from "../lib/ai";
 import AiPanel from "./AiPanel";
 
 interface CanvasWorkspaceProps {
@@ -109,7 +117,6 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
   const [initialData, setInitialData] = useState<CanvasContent | null>(null);
   const [workspaceId, setWorkspaceId] = useState<string | null>(null);
   const [editorTheme, setEditorTheme] = useState<"dark" | "light">("dark");
-  const [aiOpen, setAiOpen] = useState(false);
   const [isCollaborating, setIsCollaborating] = useState(false);
   const [collabStatus, setCollabStatus] = useState<
     "connecting" | "live" | "reconnecting" | "offline"
@@ -841,25 +848,6 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         </IconButton>
       </Tooltip>
 
-      <Tooltip title="AI">
-        <IconButton
-          onClick={() => setAiOpen(true)}
-          sx={{
-            position: "absolute",
-            top: 16,
-            left: 152,
-            zIndex: 10,
-            color: "#A6A6A6",
-            bgcolor: "rgba(18, 18, 18, 0.8)",
-            border: "1px solid #1f1f1f",
-            "&:hover": { color: "#ECECEC", bgcolor: "#27272A" },
-          }}
-          size="small"
-        >
-          <AutoAwesomeIcon fontSize="small" />
-        </IconButton>
-      </Tooltip>
-
       {/* Floating Theme Toggle */}
       <Tooltip title={isLight ? "Switch to dark mode" : "Switch to light mode"}>
         <IconButton
@@ -1026,14 +1014,55 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
                 clearCanvas: true,
               },
             }}
-          />
+          >
+            <TTDDialogTrigger>Text to diagram</TTDDialogTrigger>
+            <TTDDialog
+              onTextSubmit={async (value) => {
+                try {
+                  try {
+                    const mermaid = await generateDiagram(value);
+                    return { generatedResponse: mermaid };
+                  } catch {
+                    const mermaid = await generateDiagram(value, true);
+                    return { generatedResponse: mermaid };
+                  }
+                } catch (error) {
+                  return {
+                    generatedResponse: undefined,
+                    error: error instanceof Error ? error : new Error("Generate failed"),
+                  };
+                }
+              }}
+            />
+            <Sidebar name="ai" className="blueprint-ai-sidebar">
+              <Sidebar.Header>AI</Sidebar.Header>
+              <Sidebar.Tabs>
+                <Sidebar.TabTriggers>
+                  <Sidebar.TabTrigger tab="chat">Chat</Sidebar.TabTrigger>
+                  <Sidebar.TabTrigger tab="summarize">Summarize</Sidebar.TabTrigger>
+                </Sidebar.TabTriggers>
+                <Sidebar.Tab tab="chat">
+                  <AiPanel tab="chat" getApi={() => excalidrawRef.current} />
+                </Sidebar.Tab>
+                <Sidebar.Tab tab="summarize">
+                  <AiPanel tab="summarize" getApi={() => excalidrawRef.current} />
+                </Sidebar.Tab>
+              </Sidebar.Tabs>
+            </Sidebar>
+            <Sidebar.Trigger
+              name="ai"
+              tab="chat"
+              title="AI"
+              icon={
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.8">
+                  <path d="M12 3l1.2 3.8L17 8l-3.8 1.2L12 13l-1.2-3.8L7 8l3.8-1.2L12 3z" />
+                  <path d="M18 13l.7 2.1L21 16l-2.3.7L18 19l-.7-2.3L15 16l2.3-.9L18 13z" />
+                </svg>
+              }
+            />
+          </Excalidraw>
         )}
       </Box>
-      <AiPanel
-        open={aiOpen}
-        onClose={() => setAiOpen(false)}
-        getApi={() => excalidrawRef.current}
-      />
     </Box>
   );
 }

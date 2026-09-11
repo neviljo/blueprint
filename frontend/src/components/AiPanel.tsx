@@ -1,26 +1,13 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import {
-  Box,
-  Button,
-  Checkbox,
-  CircularProgress,
-  Drawer,
-  FormControlLabel,
-  IconButton,
-  Tab,
-  Tabs,
-  TextField,
-  Typography,
-} from "@mui/material";
-import CloseIcon from "@mui/icons-material/Close";
+import { useCallback, useEffect, useState } from "react";
 import type { ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
-import { generateDiagram, getAiHealth, streamAi } from "../lib/ai";
+import { getAiHealth, streamAi } from "../lib/ai";
 import { dumpElements, sceneElementIds } from "../lib/dumpElements";
 import { insertGeneratedElements } from "../lib/insertGeneratedElements";
-import { mermaidToElements, MermaidConvertError } from "../lib/mermaidToScene";
+import { mermaidToElements } from "../lib/mermaidToScene";
 import { SimpleMarkdown } from "../lib/simpleMarkdown";
+import "./ai-sidebar.css";
 
-type TabId = "generate" | "chat" | "summarize";
+type TabId = "chat" | "summarize";
 
 interface ChatTurn {
   role: "user" | "assistant";
@@ -31,8 +18,7 @@ interface ChatTurn {
 }
 
 interface AiPanelProps {
-  open: boolean;
-  onClose: () => void;
+  tab: TabId;
   getApi: () => ExcalidrawImperativeAPI | null;
 }
 
@@ -50,14 +36,10 @@ function currentDump(
   return { dump: dumpElements(subset), ids: sceneElementIds(subset) };
 }
 
-export default function AiPanel({ open, onClose, getApi }: AiPanelProps) {
-  const [tab, setTab] = useState<TabId>("generate");
+export default function AiPanel({ tab, getApi }: AiPanelProps) {
   const [configured, setConfigured] = useState<boolean | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
   const [selectionOnly, setSelectionOnly] = useState(false);
-  const [generatePrompt, setGeneratePrompt] = useState("");
-  const [generateBusy, setGenerateBusy] = useState(false);
-  const [generateError, setGenerateError] = useState<string | null>(null);
   const [chatInput, setChatInput] = useState("");
   const [chatTurns, setChatTurns] = useState<ChatTurn[]>([]);
   const [chatBusy, setChatBusy] = useState(false);
@@ -66,7 +48,6 @@ export default function AiPanel({ open, onClose, getApi }: AiPanelProps) {
   const [summarizeError, setSummarizeError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!open) return;
     let cancelled = false;
     getAiHealth()
       .then((health) => {
@@ -84,7 +65,7 @@ export default function AiPanel({ open, onClose, getApi }: AiPanelProps) {
     return () => {
       cancelled = true;
     };
-  }, [open]);
+  }, []);
 
   const applyMermaid = useCallback(
     async (mermaid: string, replaceIds?: string[]) => {
@@ -95,33 +76,6 @@ export default function AiPanel({ open, onClose, getApi }: AiPanelProps) {
     },
     [getApi]
   );
-
-  const handleGenerate = useCallback(async () => {
-    const prompt = generatePrompt.trim();
-    if (!prompt) return;
-    setGenerateBusy(true);
-    setGenerateError(null);
-    try {
-      const tryInsert = async (definition: string) => {
-        await applyMermaid(definition);
-      };
-      try {
-        const mermaid = await generateDiagram(prompt);
-        await tryInsert(mermaid);
-      } catch (error) {
-        if (error instanceof MermaidConvertError) {
-          const mermaid = await generateDiagram(prompt, true);
-          await tryInsert(mermaid);
-        } else {
-          throw error;
-        }
-      }
-    } catch (error) {
-      setGenerateError(error instanceof Error ? error.message : "Generate failed");
-    } finally {
-      setGenerateBusy(false);
-    }
-  }, [applyMermaid, generatePrompt]);
 
   const handleChat = useCallback(async () => {
     const text = chatInput.trim();
@@ -175,7 +129,10 @@ export default function AiPanel({ open, onClose, getApi }: AiPanelProps) {
         setChatTurns((prev) =>
           prev.map((item, i) =>
             i === turnIndex
-              ? { ...item, content: `${item.content}\n\n${error instanceof Error ? error.message : "Apply failed"}` }
+              ? {
+                  ...item,
+                  content: `${item.content}\n\n${error instanceof Error ? error.message : "Apply failed"}`,
+                }
               : item
           )
         );
@@ -211,111 +168,70 @@ export default function AiPanel({ open, onClose, getApi }: AiPanelProps) {
     }
   }, [getApi, selectionOnly]);
 
-  const notConfigured = configured === false;
+  if (configured === null) {
+    return <div className="blueprint-ai-sidebar__body">Loading AI…</div>;
+  }
 
-  const body = useMemo(() => {
-    if (configured === null) {
-      return (
-        <Box sx={{ p: 3, display: "flex", justifyContent: "center" }}>
-          <CircularProgress size={28} />
-        </Box>
-      );
-    }
-    if (notConfigured) {
-      return (
-        <Box sx={{ p: 2.5 }}>
-          <Typography variant="body2" sx={{ color: "#f87171" }}>
-            AI is not configured. Set AI_API_KEY (and AI_BASE_URL / AI_MODEL) on the backend.
-            {healthError ? ` ${healthError}` : ""}
-          </Typography>
-        </Box>
-      );
-    }
+  if (!configured) {
     return (
-      <>
-        <Tabs
-          value={tab}
-          onChange={(_, value: TabId) => setTab(value)}
-          variant="fullWidth"
-          sx={{ borderBottom: "1px solid #2a2a2a", minHeight: 40 }}
-        >
-          <Tab value="generate" label="Generate" />
-          <Tab value="chat" label="Chat" />
-          <Tab value="summarize" label="Summarize" />
-        </Tabs>
-        {(tab === "chat" || tab === "summarize") && (
-          <FormControlLabel
-            sx={{ px: 2, pt: 1 }}
-            control={
-              <Checkbox
-                size="small"
-                checked={selectionOnly}
-                onChange={(e) => setSelectionOnly(e.target.checked)}
-              />
-            }
-            label="Use selection only"
+      <div className="blueprint-ai-sidebar__body">
+        <p className="blueprint-ai-sidebar__error">
+          AI is not configured. Set AI_API_KEY on the server.
+          {healthError ? ` ${healthError}` : ""}
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="blueprint-ai-sidebar">
+      <div className="blueprint-ai-sidebar__body">
+        <label className="blueprint-ai-check">
+          <input
+            type="checkbox"
+            checked={selectionOnly}
+            onChange={(e) => setSelectionOnly(e.target.checked)}
           />
-        )}
-        {tab === "generate" && (
-          <Box sx={{ p: 2, display: "flex", flexDirection: "column", gap: 1.5 }}>
-            <TextField
-              multiline
-              minRows={4}
-              placeholder="Describe a flowchart…"
-              value={generatePrompt}
-              onChange={(e) => setGeneratePrompt(e.target.value)}
-              fullWidth
-            />
-            <Button variant="contained" onClick={handleGenerate} disabled={generateBusy}>
-              {generateBusy ? "Generating…" : "Generate"}
-            </Button>
-            {generateError && (
-              <Typography variant="body2" sx={{ color: "#f87171" }}>
-                {generateError}
-              </Typography>
-            )}
-          </Box>
-        )}
+          Use selection only
+        </label>
+
         {tab === "chat" && (
-          <Box sx={{ p: 2, display: "flex", flexDirection: "column", gap: 1.5, height: "100%" }}>
-            <Box sx={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 1 }}>
+          <>
+            <div className="blueprint-ai-sidebar__chat">
               {chatTurns.map((turn, i) => (
-                <Box
+                <div
                   key={i}
-                  sx={{
-                    alignSelf: turn.role === "user" ? "flex-end" : "flex-start",
-                    bgcolor: turn.role === "user" ? "#27272a" : "#1f1f23",
-                    px: 1.25,
-                    py: 1,
-                    borderRadius: 1.5,
-                    maxWidth: "95%",
-                  }}
+                  className={`blueprint-ai-sidebar__bubble${
+                    turn.role === "user" ? " blueprint-ai-sidebar__bubble--user" : ""
+                  }`}
                 >
                   {turn.role === "user" ? (
-                    <Typography variant="body2" sx={{ whiteSpace: "pre-wrap" }}>
-                      {turn.content}
-                    </Typography>
+                    <div style={{ whiteSpace: "pre-wrap" }}>{turn.content}</div>
                   ) : (
-                    <Typography variant="body2" component="div">
-                      <SimpleMarkdown text={turn.content} />
-                    </Typography>
+                    <SimpleMarkdown text={turn.content} />
                   )}
                   {turn.role === "assistant" && turn.mermaid && !turn.pending && (
-                    <Box sx={{ display: "flex", gap: 1, mt: 1 }}>
-                      <Button size="small" variant="contained" onClick={() => handleApply(i)}>
+                    <div className="blueprint-ai-sidebar__actions">
+                      <button type="button" className="blueprint-ai-btn" onClick={() => void handleApply(i)}>
                         Apply
-                      </Button>
-                      <Button size="small" onClick={() => handleDiscard(i)}>
+                      </button>
+                      <button
+                        type="button"
+                        className="blueprint-ai-btn blueprint-ai-btn--ghost"
+                        onClick={() => handleDiscard(i)}
+                      >
                         Discard
-                      </Button>
-                    </Box>
+                      </button>
+                    </div>
                   )}
-                </Box>
+                </div>
               ))}
-            </Box>
-            <TextField
+            </div>
+            <input
+              type="text"
               placeholder="Ask or request a change…"
               value={chatInput}
+              disabled={chatBusy}
               onChange={(e) => setChatInput(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
@@ -323,74 +239,25 @@ export default function AiPanel({ open, onClose, getApi }: AiPanelProps) {
                   void handleChat();
                 }
               }}
-              disabled={chatBusy}
-              fullWidth
             />
-          </Box>
+          </>
         )}
-        {tab === "summarize" && (
-          <Box sx={{ p: 2, display: "flex", flexDirection: "column", gap: 1.5 }}>
-            <Button variant="contained" onClick={handleSummarize} disabled={summarizeBusy}>
-              {summarizeBusy ? "Summarizing…" : "Summarize drawing"}
-            </Button>
-            {summarizeError && (
-              <Typography variant="body2" sx={{ color: "#f87171" }}>
-                {summarizeError}
-              </Typography>
-            )}
-            {summarizeText && (
-              <Typography variant="body2" component="div">
-                <SimpleMarkdown text={summarizeText} />
-              </Typography>
-            )}
-          </Box>
-        )}
-      </>
-    );
-  }, [
-    chatBusy,
-    chatInput,
-    chatTurns,
-    configured,
-    generateBusy,
-    generateError,
-    generatePrompt,
-    handleApply,
-    handleChat,
-    handleDiscard,
-    handleGenerate,
-    handleSummarize,
-    healthError,
-    notConfigured,
-    selectionOnly,
-    summarizeBusy,
-    summarizeError,
-    summarizeText,
-    tab,
-  ]);
 
-  return (
-    <Drawer
-      anchor="right"
-      open={open}
-      onClose={onClose}
-      slotProps={{
-        paper: {
-          sx: {
-            width: 380,
-            bgcolor: "#161616",
-            color: "#ECECEC",
-          },
-        },
-      }}
-    >
-      <Box sx={{ display: "flex", alignItems: "center", px: 2, py: 1.25, borderBottom: "1px solid #2a2a2a" }}>
-        <Typography sx={{ fontWeight: 700, flex: 1 }}>AI</Typography>
-        <IconButton onClick={onClose} size="small" sx={{ color: "#A6A6A6" }}>
-          <CloseIcon fontSize="small" />
-        </IconButton>
-      </Box>
-      {body}
-    </Drawer>
+        {tab === "summarize" && (
+          <>
+            <button
+              type="button"
+              className="blueprint-ai-btn"
+              onClick={() => void handleSummarize()}
+              disabled={summarizeBusy}
+            >
+              {summarizeBusy ? "Summarizing…" : "Summarize drawing"}
+            </button>
+            {summarizeError && <p className="blueprint-ai-sidebar__error">{summarizeError}</p>}
+            {summarizeText && <SimpleMarkdown text={summarizeText} />}
+          </>
+        )}
+      </div>
+    </div>
   );
 }
