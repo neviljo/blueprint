@@ -38,30 +38,21 @@ interface ChunkMeta {
   nonce: string;
 }
 
+type ScenePayload = {
+  type: "SCENE_UPDATE" | "SCENE_RESPONSE";
+  forClientId?: string;
+  elements: ExcalidrawElement[];
+  appState?: Partial<AppState>;
+  chunk?: ChunkMeta;
+};
+
 type SocketPayload =
-  | {
-      type: "SCENE_UPDATE";
-      clientId?: string;
-      elements: ExcalidrawElement[];
-      appState?: Partial<AppState>;
-      chunk?: ChunkMeta;
-    }
+  | ScenePayload
   | {
       type: "REQUEST_SCENE";
-      clientId: string;
-    }
-  | {
-      type: "SCENE_RESPONSE";
-      clientId?: string;
-      elements: ExcalidrawElement[];
-      appState?: Partial<AppState>;
-      chunk?: ChunkMeta;
     }
   | {
       type: "CURSOR_UPDATE";
-      clientId: string;
-      username: string;
-      color: CollabColor;
       pointer: CollabPointer | null;
     };
 
@@ -74,7 +65,7 @@ const COLLAB_COLORS: CollabColor[] = [
   { background: "#22d3ee", stroke: "#155e75" },
 ];
 
-const POINTER_THROTTLE_MS = 50; // ~20fps smooth cursor stream
+const POINTER_THROTTLE_MS = 100; // ~10fps; lossy is fine, trailing flush keeps last pose
 const SCENE_BROADCAST_THROTTLE_MS = 50; // Max 20 msgs/sec for live strokes
 const POINTER_IDLE_CLEAR_MS = 1500;
 const MAX_CHUNK_BYTES = 28000; // Stay conservatively under Ably's 64KB limit
@@ -133,9 +124,9 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
   });
 
   const ablyClientRef = useRef<Ably.Realtime | null>(null);
-  const channelRef = useRef<Ably.RealtimeChannel | null>(null);
+  const sceneChannelRef = useRef<Ably.RealtimeChannel | null>(null);
+  const cursorChannelRef = useRef<Ably.RealtimeChannel | null>(null);
   const myClientIdRef = useRef<string | null>(null);
-  const isRemoteUpdateRef = useRef(false);
   const previousElementsMap = useRef<Map<string, { version: number; versionNonce: number }>>(new Map());
   const pendingBroadcastElementsRef = useRef<Map<string, ExcalidrawElement>>(new Map());
   const collaboratorsRef = useRef<Map<SocketId, Collaborator>>(new Map());
@@ -153,6 +144,8 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
   >(new Map());
 
   const lastPointerPublishRef = useRef(0);
+  const pendingPointerRef = useRef<CollabPointer | null | undefined>(undefined);
+  const pointerFlushTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pointerIdleTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [collaboratorsList, setCollaboratorsList] = useState<Collaborator[]>([]);
@@ -161,28 +154,35 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
     color: COLLAB_COLORS[0],
   });
 
-  // Serializes and publishes socket payloads (with chunking for large snapshots)
+  // Publishes objects (Ably msgpack) — never pre-stringify. Cursors go on a
+  // separate channel so they cannot stall scene deltas at the 50 msg/s cap.
   const sendPayload = useCallback((data: SocketPayload) => {
-    const channel = channelRef.current;
+    if (data.type === "CURSOR_UPDATE") {
+      const channel = cursorChannelRef.current;
+      if (!channel || channel.state !== "attached") return;
+      channel.publish("cursor", data).catch((error) => {
+        console.warn("[COLLAB] Failed to publish cursor:", error);
+      });
+      return;
+    }
+
+    const channel = sceneChannelRef.current;
     if (!channel || channel.state !== "attached") {
       console.debug("[COLLAB] sendPayload skipped — channel not attached, state:", channel?.state);
       return;
     }
 
-    data.clientId = myClientIdRef.current || undefined;
-
     if (data.type === "SCENE_UPDATE" || data.type === "SCENE_RESPONSE") {
       const rawElements = data.elements;
-      const testJson = JSON.stringify(data);
+      const estimated = JSON.stringify(data).length;
 
-      if (testJson.length <= MAX_CHUNK_BYTES) {
-        channel.publish("collab", testJson).catch((error) => {
+      if (estimated <= MAX_CHUNK_BYTES) {
+        channel.publish("collab", data).catch((error) => {
           console.warn("[COLLAB] Failed to publish payload:", error);
         });
         return;
       }
 
-      // Split large canvas snapshots into sub-chunks staying under Ably's limit
       const parts = splitElements(rawElements);
       const total = parts.length;
       const nonce = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -194,14 +194,14 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
           appState: index === total - 1 ? data.appState : undefined,
           chunk: { index, total, nonce },
         };
-        channel.publish("collab", JSON.stringify(chunkPayload)).catch((error) => {
+        channel.publish("collab", chunkPayload).catch((error) => {
           console.warn("[COLLAB] Failed to publish chunk:", error);
         });
       });
       return;
     }
 
-    channel.publish("collab", JSON.stringify(data)).catch((error) => {
+    channel.publish("collab", data).catch((error) => {
       console.warn("[COLLAB] Failed to publish payload:", error);
     });
   }, []);
@@ -353,26 +353,84 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         myClientIdRef.current = client.clientId;
         console.info("[COLLAB] Connected. clientId:", client.clientId);
 
-        // 3. Attach to canvas room channel
-        const channel = client.channels.get(`canvas:${canvasId}:collab`);
-        channelRef.current = channel;
+        // 3. Separate scene vs cursor channels so pointer spam cannot stall strokes
+        const sceneChannel = client.channels.get(`canvas:${canvasId}:scene`);
+        const cursorChannel = client.channels.get(`canvas:${canvasId}:cursors`);
+        sceneChannelRef.current = sceneChannel;
+        cursorChannelRef.current = cursorChannel;
 
-        // Subscribe to all collab messages
-        channel.subscribe((message: Ably.Message) => {
-          if (disposed || typeof message.data !== "string") return;
-
-          let payload: SocketPayload | null = null;
-          try {
-            payload = JSON.parse(message.data) as SocketPayload;
-          } catch {
-            console.warn("[COLLAB] Failed to parse message:", message.data);
-            return;
+        const parsePayload = (data: unknown): SocketPayload | null => {
+          if (typeof data === "string") {
+            try {
+              return JSON.parse(data) as SocketPayload;
+            } catch {
+              console.warn("[COLLAB] Failed to parse message:", data);
+              return null;
+            }
           }
+          if (data && typeof data === "object") {
+            return data as SocketPayload;
+          }
+          return null;
+        };
+
+        const applyRemoteScene = (payload: ScenePayload) => {
+          if (payload.type === "SCENE_UPDATE") {
+            const localElements = excalidrawRef.current?.getSceneElements() || currentContentRef.current.elements;
+            const currentAppState = excalidrawRef.current?.getAppState() || currentContentRef.current.appState;
+
+            const reconciled = reconcileElements(
+              localElements as any,
+              payload.elements as any,
+              currentAppState as any
+            ) as ExcalidrawElement[];
+
+            currentContentRef.current.elements = reconciled;
+            reconciled.forEach((el) => {
+              previousElementsMap.current.set(el.id, {
+                version: el.version,
+                versionNonce: el.versionNonce,
+              });
+            });
+
+            excalidrawRef.current?.updateScene({
+              elements: reconciled,
+              appState: payload.appState?.theme ? { theme: payload.appState.theme } : undefined,
+              collaborators: new Map(collaboratorsRef.current),
+              captureUpdate: CaptureUpdateAction.NEVER,
+            });
+          } else {
+            currentContentRef.current.elements = payload.elements;
+            payload.elements.forEach((el) => {
+              previousElementsMap.current.set(el.id, {
+                version: el.version,
+                versionNonce: el.versionNonce,
+              });
+            });
+
+            excalidrawRef.current?.updateScene({
+              elements: payload.elements,
+              appState: payload.appState?.theme ? { theme: payload.appState.theme } : undefined,
+              collaborators: new Map(collaboratorsRef.current),
+              captureUpdate: CaptureUpdateAction.NEVER,
+            });
+          }
+
+          if (payload.appState?.theme === "light" || payload.appState?.theme === "dark") {
+            setEditorTheme(payload.appState.theme);
+          }
+        };
+
+        sceneChannel.subscribe("collab", (message: Ably.Message) => {
+          if (disposed) return;
+
+          const payload = parsePayload(message.data);
           if (!payload || !payload.type) return;
 
           if (payload.type === "SCENE_UPDATE" || payload.type === "SCENE_RESPONSE") {
+            let next: ScenePayload = payload;
             if (payload.chunk) {
-              const sender = payload.clientId || message.clientId || "unknown";
+              const sender = message.clientId || "unknown";
               const { index, total, nonce } = payload.chunk;
               let buffer = sceneChunksRef.current.get(sender);
 
@@ -400,117 +458,78 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
                 if (!part) return;
                 assembled.push(...part);
               }
-              payload.elements = assembled;
-              if (buffer.appState) payload.appState = buffer.appState;
+              next = {
+                ...payload,
+                elements: assembled,
+                appState: buffer.appState ?? payload.appState,
+              };
             }
 
-            if (payload.type === "SCENE_UPDATE") {
-              const localElements = excalidrawRef.current?.getSceneElements() || currentContentRef.current.elements;
-              const currentAppState = excalidrawRef.current?.getAppState() || currentContentRef.current.appState;
-
-              const reconciled = reconcileElements(
-                localElements as any,
-                payload.elements as any,
-                currentAppState as any
-              ) as ExcalidrawElement[];
-
-              currentContentRef.current.elements = reconciled;
-              reconciled.forEach((el) => {
-                previousElementsMap.current.set(el.id, {
-                  version: el.version,
-                  versionNonce: el.versionNonce,
-                });
-              });
-
-              isRemoteUpdateRef.current = true;
-              excalidrawRef.current?.updateScene({
-                elements: reconciled,
-                appState: payload.appState?.theme ? { theme: payload.appState.theme } : undefined,
-                collaborators: new Map(collaboratorsRef.current),
-                captureUpdate: CaptureUpdateAction.NEVER,
-              });
-
-              setTimeout(() => {
-                isRemoteUpdateRef.current = false;
-              }, 50);
-
-              if (payload.appState?.theme === "light" || payload.appState?.theme === "dark") {
-                setEditorTheme(payload.appState.theme);
-              }
-
-            } else if (payload.type === "SCENE_RESPONSE") {
-              currentContentRef.current.elements = payload.elements;
-              payload.elements.forEach((el) => {
-                previousElementsMap.current.set(el.id, {
-                  version: el.version,
-                  versionNonce: el.versionNonce,
-                });
-              });
-
-              isRemoteUpdateRef.current = true;
-              excalidrawRef.current?.updateScene({
-                elements: payload.elements,
-                appState: payload.appState?.theme ? { theme: payload.appState.theme } : undefined,
-                collaborators: new Map(collaboratorsRef.current),
-                captureUpdate: CaptureUpdateAction.NEVER,
-              });
-
-              setTimeout(() => {
-                isRemoteUpdateRef.current = false;
-              }, 50);
-
-              if (payload.appState?.theme === "light" || payload.appState?.theme === "dark") {
-                setEditorTheme(payload.appState.theme);
-              }
+            if (next.type === "SCENE_RESPONSE" && next.forClientId !== myClientIdRef.current) {
+              return;
             }
 
-          } else if (payload.type === "REQUEST_SCENE") {
+            applyRemoteScene(next);
+            return;
+          }
+
+          if (payload.type === "REQUEST_SCENE") {
+            const requesterId = message.clientId;
+            if (!requesterId || requesterId === myClientIdRef.current) return;
             const currentElements = excalidrawRef.current?.getSceneElements() || currentContentRef.current.elements;
             if (currentElements.length > 0) {
               sendPayload({
                 type: "SCENE_RESPONSE",
+                forClientId: requesterId,
                 elements: [...currentElements],
                 appState: excalidrawRef.current?.getAppState() || currentContentRef.current.appState,
               });
             }
-
-          } else if (payload.type === "CURSOR_UPDATE") {
-            if (payload.clientId === myClientIdRef.current) return;
-            const socketId = payload.clientId as SocketId;
-            const existing = collaboratorsRef.current.get(socketId);
-
-            if (!payload.pointer) {
-              if (existing) {
-                collaboratorsRef.current.set(socketId, {
-                  ...existing,
-                  pointer: undefined,
-                });
-              }
-            } else {
-              collaboratorsRef.current.set(socketId, {
-                id: payload.clientId,
-                socketId,
-                username: payload.username || existing?.username || "Collaborator",
-                color: payload.color || existing?.color || COLLAB_COLORS[0],
-                pointer: {
-                  x: payload.pointer.x,
-                  y: payload.pointer.y,
-                  tool: payload.pointer.tool || "pointer",
-                  renderCursor: true,
-                },
-                userState: UserIdleState.ACTIVE,
-                button: "up",
-              });
-            }
-
-            const nextMap = new Map(collaboratorsRef.current);
-            excalidrawRef.current?.updateScene({ collaborators: nextMap });
-            setCollaboratorsList(Array.from(collaboratorsRef.current.values()));
           }
         });
 
+        cursorChannel.subscribe("cursor", (message: Ably.Message) => {
+          if (disposed) return;
+
+          const payload = parsePayload(message.data);
+          if (!payload || payload.type !== "CURSOR_UPDATE") return;
+
+          const socketId = (message.clientId || "") as SocketId;
+          if (!socketId || socketId === myClientIdRef.current) return;
+
+          const existing = collaboratorsRef.current.get(socketId);
+          if (!payload.pointer) {
+            if (existing) {
+              collaboratorsRef.current.set(socketId, {
+                ...existing,
+                pointer: undefined,
+              });
+            }
+          } else {
+            collaboratorsRef.current.set(socketId, {
+              id: socketId,
+              socketId,
+              username: existing?.username || "Collaborator",
+              color: existing?.color || COLLAB_COLORS[0],
+              pointer: {
+                x: payload.pointer.x,
+                y: payload.pointer.y,
+                tool: payload.pointer.tool || "pointer",
+                renderCursor: true,
+              },
+              userState: UserIdleState.ACTIVE,
+              button: "up",
+            });
+          }
+
+          // Pointer-only: do not setCollaboratorsList (avoids re-rendering the whole board)
+          excalidrawRef.current?.updateScene({
+            collaborators: new Map(collaboratorsRef.current),
+          });
+        });
+
         // 5. Ably Presence for Room Member Avatars (low-frequency enter/leave)
-        channel.presence.subscribe((member) => {
+        sceneChannel.presence.subscribe((member) => {
           if (member.clientId === myClientIdRef.current) return;
           const socketId = member.clientId as SocketId;
 
@@ -536,13 +555,13 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
           excalidrawRef.current?.updateScene({ collaborators: new Map(collaboratorsRef.current) });
         });
 
-        await channel.attach();
+        await Promise.all([sceneChannel.attach(), cursorChannel.attach()]);
 
         // Join presence once on room attach to share our name & color avatar
-        await channel.presence.enter({ username: userName, color });
+        await sceneChannel.presence.enter({ username: userName, color });
 
         // Query initial present room members to populate avatar stack instantly
-        const existingMembers = await channel.presence.get();
+        const existingMembers = await sceneChannel.presence.get();
         existingMembers.forEach((m) => {
           if (m.clientId === myClientIdRef.current) return;
           const data = m.data as { username: string; color: CollabColor } | undefined;
@@ -562,10 +581,8 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         setCollaboratorsList(Array.from(collaboratorsRef.current.values()));
         excalidrawRef.current?.updateScene({ collaborators: new Map(collaboratorsRef.current) });
 
-        // Send initial REQUEST_SCENE to active peers in the room
         sendPayload({
           type: "REQUEST_SCENE",
-          clientId: client.clientId,
         });
 
       } catch (err) {
@@ -590,20 +607,30 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         clearTimeout(pointerIdleTimeoutRef.current);
         pointerIdleTimeoutRef.current = null;
       }
+      if (pointerFlushTimeoutRef.current) {
+        clearTimeout(pointerFlushTimeoutRef.current);
+        pointerFlushTimeoutRef.current = null;
+      }
       if (sceneBroadcastTimeoutRef.current) {
         clearTimeout(sceneBroadcastTimeoutRef.current);
         sceneBroadcastTimeoutRef.current = null;
       }
 
-      const channel = channelRef.current;
+      const sceneChannel = sceneChannelRef.current;
+      const cursorChannel = cursorChannelRef.current;
       const client = ablyClientRef.current;
-      channelRef.current = null;
+      sceneChannelRef.current = null;
+      cursorChannelRef.current = null;
       ablyClientRef.current = null;
 
-      if (channel) {
-        channel.presence.leave().catch(() => undefined);
-        channel.unsubscribe();
-        channel.detach().catch(() => undefined);
+      if (sceneChannel) {
+        sceneChannel.presence.leave().catch(() => undefined);
+        sceneChannel.unsubscribe();
+        sceneChannel.detach().catch(() => undefined);
+      }
+      if (cursorChannel) {
+        cursorChannel.unsubscribe();
+        cursorChannel.detach().catch(() => undefined);
       }
       client?.connection.off();
       client?.close();
@@ -629,18 +656,11 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
     elements: readonly ExcalidrawElement[],
     appState: AppState
   ) => {
-    if (isRemoteUpdateRef.current) {
-      return;
-    }
-
-    currentContentRef.current = {
-      elements: [...elements],
-      appState,
-    };
-
     setEditorTheme(appState.theme === "light" ? "light" : "dark");
 
-    // Strict delta diffing: broadcast ONLY modified elements
+    // Version diff already ignores remote-applied elements (map is updated
+    // before updateScene). Do not mute onChange with a timer — that dropped
+    // local strokes while the other person was drawing.
     const changedElements: ExcalidrawElement[] = [];
     elements.forEach((el) => {
       const prev = previousElementsMap.current.get(el.id);
@@ -657,42 +677,45 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       });
     });
 
-    if (changedElements.length > 0) {
-      // Accumulate all changed elements into the pending map (keyed by id so
-      // newer versions overwrite older ones between throttle windows)
-      changedElements.forEach((el) => {
-        pendingBroadcastElementsRef.current.set(el.id, el);
-      });
-
-      const now = Date.now();
-      if (now - lastSceneBroadcastRef.current >= SCENE_BROADCAST_THROTTLE_MS) {
-        // Enough time has passed — flush immediately
-        lastSceneBroadcastRef.current = now;
-        if (sceneBroadcastTimeoutRef.current) {
-          clearTimeout(sceneBroadcastTimeoutRef.current);
-          sceneBroadcastTimeoutRef.current = null;
-        }
-        const toSend = Array.from(pendingBroadcastElementsRef.current.values());
-        pendingBroadcastElementsRef.current.clear();
-        broadcastSceneUpdate(toSend, appState);
-      } else {
-        // Schedule trailing flush to catch the final state
-        if (sceneBroadcastTimeoutRef.current) {
-          clearTimeout(sceneBroadcastTimeoutRef.current);
-        }
-        sceneBroadcastTimeoutRef.current = setTimeout(() => {
-          sceneBroadcastTimeoutRef.current = null;
-          lastSceneBroadcastRef.current = Date.now();
-          const toSend = Array.from(pendingBroadcastElementsRef.current.values());
-          pendingBroadcastElementsRef.current.clear();
-          if (toSend.length > 0) {
-            broadcastSceneUpdate(toSend, appState);
-          }
-        }, 60);
-      }
+    if (changedElements.length === 0) {
+      currentContentRef.current.appState = appState;
+      return;
     }
 
-    // Debounced database backup save
+    currentContentRef.current = {
+      elements: [...elements],
+      appState,
+    };
+
+    changedElements.forEach((el) => {
+      pendingBroadcastElementsRef.current.set(el.id, el);
+    });
+
+    const now = Date.now();
+    if (now - lastSceneBroadcastRef.current >= SCENE_BROADCAST_THROTTLE_MS) {
+      lastSceneBroadcastRef.current = now;
+      if (sceneBroadcastTimeoutRef.current) {
+        clearTimeout(sceneBroadcastTimeoutRef.current);
+        sceneBroadcastTimeoutRef.current = null;
+      }
+      const toSend = Array.from(pendingBroadcastElementsRef.current.values());
+      pendingBroadcastElementsRef.current.clear();
+      broadcastSceneUpdate(toSend, appState);
+    } else {
+      if (sceneBroadcastTimeoutRef.current) {
+        clearTimeout(sceneBroadcastTimeoutRef.current);
+      }
+      sceneBroadcastTimeoutRef.current = setTimeout(() => {
+        sceneBroadcastTimeoutRef.current = null;
+        lastSceneBroadcastRef.current = Date.now();
+        const toSend = Array.from(pendingBroadcastElementsRef.current.values());
+        pendingBroadcastElementsRef.current.clear();
+        if (toSend.length > 0) {
+          broadcastSceneUpdate(toSend, appState);
+        }
+      }, SCENE_BROADCAST_THROTTLE_MS);
+    }
+
     if (saveTimeoutRef.current) {
       clearTimeout(saveTimeoutRef.current);
     }
@@ -701,43 +724,58 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
     }, 1500);
   };
 
-  // Live Mouse Pointer Streaming (CURSOR_UPDATE)
+  const flushPointer = useCallback(() => {
+    pointerFlushTimeoutRef.current = null;
+    if (pendingPointerRef.current === undefined) return;
+    lastPointerPublishRef.current = Date.now();
+    const pointer = pendingPointerRef.current;
+    pendingPointerRef.current = undefined;
+    sendPayload({
+      type: "CURSOR_UPDATE",
+      pointer,
+    });
+  }, [sendPayload]);
+
+  // Live mouse pointers: tiny payload, trailing throttle, droppable-by-rate.
   const handlePointerUpdate = useCallback(
     (payload: {
       pointer: { x: number; y: number; tool: "pointer" | "laser" };
       button: "down" | "up";
     }) => {
-      const now = Date.now();
-      if (now - lastPointerPublishRef.current < POINTER_THROTTLE_MS) return;
-      lastPointerPublishRef.current = now;
+      pendingPointerRef.current = {
+        x: payload.pointer.x,
+        y: payload.pointer.y,
+        tool: payload.pointer.tool,
+      };
 
-      sendPayload({
-        type: "CURSOR_UPDATE",
-        clientId: myClientIdRef.current || "",
-        username: currentUserInfo.name,
-        color: currentUserInfo.color,
-        pointer: {
-          x: payload.pointer.x,
-          y: payload.pointer.y,
-          tool: payload.pointer.tool,
-        },
-      });
+      const wait = POINTER_THROTTLE_MS - (Date.now() - lastPointerPublishRef.current);
+      if (wait <= 0) {
+        if (pointerFlushTimeoutRef.current) {
+          clearTimeout(pointerFlushTimeoutRef.current);
+        }
+        flushPointer();
+      } else if (!pointerFlushTimeoutRef.current) {
+        pointerFlushTimeoutRef.current = setTimeout(flushPointer, wait);
+      }
 
       if (pointerIdleTimeoutRef.current) {
         clearTimeout(pointerIdleTimeoutRef.current);
       }
       pointerIdleTimeoutRef.current = setTimeout(() => {
         pointerIdleTimeoutRef.current = null;
+        pendingPointerRef.current = undefined;
+        if (pointerFlushTimeoutRef.current) {
+          clearTimeout(pointerFlushTimeoutRef.current);
+          pointerFlushTimeoutRef.current = null;
+        }
+        lastPointerPublishRef.current = Date.now();
         sendPayload({
           type: "CURSOR_UPDATE",
-          clientId: myClientIdRef.current || "",
-          username: currentUserInfo.name,
-          color: currentUserInfo.color,
           pointer: null,
         });
       }, POINTER_IDLE_CLEAR_MS);
     },
-    [sendPayload, currentUserInfo]
+    [flushPointer, sendPayload]
   );
 
   const handleExcalidrawAPI = useCallback((api: ExcalidrawImperativeAPI) => {
@@ -755,7 +793,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
     });
     sendPayload({
       type: "SCENE_UPDATE",
-      elements: currentContentRef.current.elements,
+      elements: [],
       appState: { theme: next, viewBackgroundColor: "#ffffff" },
     });
     saveCanvasContent(currentContentRef.current.elements, updatedAppState);

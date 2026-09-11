@@ -2,13 +2,19 @@ import Ably from "ably";
 import { HttpError } from "../errors.js";
 
 /**
- * Ably channel used to synchronize a single canvas between active
- * workspace members. Channel names may contain ":" (only "*" is reserved
- * for capability wildcards), and are scoped per canvas so tokens can be
- * limited to exactly one room.
+ * Scene channel: element deltas, join snapshots, and presence (avatars).
+ * Cursor channel: high-frequency pointer packets.
+ *
+ * Split so pointer traffic cannot stall strokes against Ably's default
+ * 50 messages/sec per-channel limit. Channel names may contain ":"
+ * (only "*" is reserved for capability wildcards).
  */
-export function canvasChannelName(canvasId: string): string {
-  return `canvas:${canvasId}:collab`;
+export function canvasSceneChannelName(canvasId: string): string {
+  return `canvas:${canvasId}:scene`;
+}
+
+export function canvasCursorChannelName(canvasId: string): string {
+  return `canvas:${canvasId}:cursors`;
 }
 
 let restClient: Ably.Rest | null = null;
@@ -33,7 +39,7 @@ function getRestClient(): Ably.Rest {
 /**
  * Mints a short-lived Ably token request for the given canvas.
  * The token is bound to the requesting user (clientId) and is limited to
- * publish/subscribe/presence on that single canvas's channel.
+ * the scene + cursor channels for that canvas only.
  */
 export async function createCanvasTokenRequest(
   canvasId: string,
@@ -45,7 +51,8 @@ export async function createCanvasTokenRequest(
     clientId: userId,
     ttl: 60 * 60 * 1000, // 1 hour
     capability: {
-      [canvasChannelName(canvasId)]: ["publish", "subscribe", "presence"],
+      [canvasSceneChannelName(canvasId)]: ["publish", "subscribe", "presence"],
+      [canvasCursorChannelName(canvasId)]: ["publish", "subscribe"],
     },
   });
 }
