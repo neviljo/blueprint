@@ -27,6 +27,7 @@
 .blueprint-ai-sidebar textarea,
 .blueprint-ai-sidebar input[type="text"] {
   width: 100%;
+  box-sizing: border-box;
   flex-shrink: 0;
   resize: vertical;
   border: 1px solid var(--color-gray-20);
@@ -35,6 +36,15 @@
   background: var(--island-bg-color);
   color: var(--text-primary-color);
   font: inherit;
+}
+
+.blueprint-ai-sidebar__composer {
+  min-height: 4.5rem;
+  max-height: 10rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.4;
 }
 
 .blueprint-ai-sidebar button.blueprint-ai-btn {

@@ -41,6 +41,22 @@ export async function generateDiagram(prompt: string, repair = false): Promise<s
   return data.mermaid;
 }
 
+function consumeSse(chunk: string, onToken: (text: string) => void): string {
+  const events = chunk.split("\n\n");
+  const rest = events.pop() ?? "";
+  for (const event of events) {
+    const data = event
+      .split("\n")
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trim())
+      .join("");
+    if (!data || data === "[DONE]") continue;
+    const token = JSON.parse(data) as unknown;
+    if (typeof token === "string" && token) onToken(token);
+  }
+  return rest;
+}
+
 export async function streamAi(
   path: "/api/ai/chat/stream" | "/api/ai/summarize/stream",
   body: unknown,
@@ -49,7 +65,10 @@ export async function streamAi(
   const response = await fetch(path, {
     method: "POST",
     credentials: "include",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+    },
     body: JSON.stringify(body),
   });
   if (!response.ok) {
@@ -61,17 +80,26 @@ export async function streamAi(
 
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
+  let buffer = "";
   let full = "";
 
   while (true) {
     const { value, done } = await reader.read();
-    if (done) break;
-    const chunk = decoder.decode(value, { stream: true });
-    if (!chunk) continue;
-    full += chunk;
-    onToken(chunk);
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+    buffer = consumeSse(buffer, (token) => {
+      full += token;
+      onToken(token);
+    });
+    if (done) {
+      if (buffer.trim()) {
+        consumeSse(buffer + "\n\n", (token) => {
+          full += token;
+          onToken(token);
+        });
+      }
+      break;
+    }
   }
-  full += decoder.decode();
 
   if (path === "/api/ai/summarize/stream") {
     return { reply: full.trim(), mermaid: null };

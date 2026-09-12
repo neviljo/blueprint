@@ -1,5 +1,5 @@
 import { createOpenAI } from "@ai-sdk/openai";
-import { APICallError, createTextStreamResponse, generateText, streamText, toTextStream } from "ai";
+import { APICallError, generateText, streamText } from "ai";
 
 import { HttpError } from "../errors.js";
 import { getAiApiKey, getAiBaseUrl, getAiModels, isAiConfigured } from "./config.js";
@@ -79,10 +79,10 @@ export async function completeText(options: {
   throw toHttpError(lastError);
 }
 
-export function streamTextResponse(options: {
+export function startTextStream(options: {
   system: string;
   messages: { role: "user" | "assistant"; content: string }[];
-}): Response {
+}) {
   if (!isAiConfigured()) {
     throw new HttpError(503, "AI is not configured. Set AI_API_KEY.");
   }
@@ -92,7 +92,7 @@ export function streamTextResponse(options: {
   }
 
   const openai = provider();
-  const result = streamText({
+  return streamText({
     model: openai.chat(models[0]),
     system: options.system,
     messages: options.messages.map((message) => ({
@@ -100,13 +100,5 @@ export function streamTextResponse(options: {
       content: message.content,
     })),
     timeout: 60_000,
-  });
-
-  return createTextStreamResponse({
-    headers: {
-      "Cache-Control": "no-cache, no-transform",
-      "X-Accel-Buffering": "no",
-    },
-    stream: toTextStream({ stream: result.stream }),
   });
 }

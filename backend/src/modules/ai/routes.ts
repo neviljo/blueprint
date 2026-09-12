@@ -1,11 +1,12 @@
 import { Hono } from "hono";
+import { streamSSE } from "hono/streaming";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 
 import { requireAuth } from "../auth/middleware.js";
 import { HttpError } from "../errors.js";
 import { getAiModels, isAiConfigured } from "./config.js";
-import { completeText, streamTextResponse } from "./llm.js";
+import { completeText, startTextStream } from "./llm.js";
 import { extractMermaid, stripMermaidFences } from "./mermaid.js";
 import {
   CHAT_SYSTEM,
@@ -74,11 +75,18 @@ router.post("/chat", requireAuth, zValidator("json", chatSchema), async (c) => {
   });
 });
 
-router.post("/chat/stream", requireAuth, zValidator("json", chatSchema), async (c) => {
+router.post("/chat/stream", requireAuth, zValidator("json", chatSchema), (c) => {
   const { messages, dump } = c.req.valid("json");
-  return streamTextResponse({
+  const result = startTextStream({
     system: `${CHAT_SYSTEM}\n\nDiagram dump:\n${dump || "(empty)"}`,
     messages,
+  });
+  c.header("Cache-Control", "no-cache, no-transform");
+  c.header("X-Accel-Buffering", "no");
+  return streamSSE(c, async (stream) => {
+    for await (const delta of result.textStream) {
+      await stream.writeSSE({ data: JSON.stringify(delta) });
+    }
   });
 });
 
@@ -91,11 +99,18 @@ router.post("/summarize", requireAuth, zValidator("json", summarizeSchema), asyn
   return c.json({ reply: text.trim() });
 });
 
-router.post("/summarize/stream", requireAuth, zValidator("json", summarizeSchema), async (c) => {
+router.post("/summarize/stream", requireAuth, zValidator("json", summarizeSchema), (c) => {
   const { dump } = c.req.valid("json");
-  return streamTextResponse({
+  const result = startTextStream({
     system: SUMMARIZE_SYSTEM,
     messages: [{ role: "user", content: dump }],
+  });
+  c.header("Cache-Control", "no-cache, no-transform");
+  c.header("X-Accel-Buffering", "no");
+  return streamSSE(c, async (stream) => {
+    for await (const delta of result.textStream) {
+      await stream.writeSSE({ data: JSON.stringify(delta) });
+    }
   });
 });
 

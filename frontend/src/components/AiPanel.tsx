@@ -32,7 +32,9 @@ function currentDump(
 
 function visibleReply(text: string, pending: boolean | undefined): string {
   if (!pending) return text;
-  return text.replace(/```(?:mermaid)?[\s\S]*?(```|$)/gi, "").trimEnd();
+  const visible = text.replace(/```(?:mermaid)?[\s\S]*?(```|$)/gi, "").trimEnd();
+  if (visible) return visible;
+  return text.trim() ? "Generating diagram…" : "";
 }
 
 export default function AiPanel({ tab, canvasId, getApi }: AiPanelProps) {
@@ -264,11 +266,12 @@ export default function AiPanel({ tab, canvasId, getApi }: AiPanelProps) {
                 </div>
               ))}
             </div>
-            <input
-              type="text"
+            <textarea
+              className="blueprint-ai-sidebar__composer"
               placeholder="Ask or request a change…"
               value={chatInput}
               disabled={chatBusy}
+              rows={3}
               onChange={(e) => setChatInput(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
