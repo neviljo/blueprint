@@ -1,8 +1,16 @@
+.excalidraw .sidebar.blueprint-ai-sidebar .sidebar-tabs-root,
+.excalidraw .sidebar.blueprint-ai-sidebar [role="tabpanel"] {
+  min-height: 0;
+  overflow: hidden;
+}
+
 .blueprint-ai-sidebar {
   display: flex;
   flex-direction: column;
+  flex: 1 1 auto;
   height: 100%;
   min-height: 0;
+  overflow: hidden;
   font-size: 0.8125rem;
 }
 
@@ -12,13 +20,14 @@
   gap: 0.75rem;
   padding: 0.75rem;
   min-height: 0;
-  flex: 1;
+  flex: 1 1 auto;
   overflow: hidden;
 }
 
 .blueprint-ai-sidebar textarea,
 .blueprint-ai-sidebar input[type="text"] {
   width: 100%;
+  flex-shrink: 0;
   resize: vertical;
   border: 1px solid var(--color-gray-20);
   border-radius: 0.5rem;
@@ -36,6 +45,7 @@
   color: var(--color-surface-lowest);
   font-weight: 600;
   cursor: pointer;
+  flex-shrink: 0;
 }
 
 .blueprint-ai-sidebar button.blueprint-ai-btn:disabled {
@@ -53,17 +63,16 @@
   color: var(--color-danger);
 }
 
-.blueprint-ai-sidebar__hint {
-  color: var(--color-gray-40);
-}
-
-.blueprint-ai-sidebar__chat {
-  flex: 1;
+.blueprint-ai-sidebar__chat,
+.blueprint-ai-sidebar__summary {
+  flex: 1 1 0;
+  min-height: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
-  min-height: 0;
+  overscroll-behavior: contain;
 }
 
 .blueprint-ai-sidebar__bubble {
@@ -71,6 +80,8 @@
   padding: 0.5rem 0.65rem;
   max-width: 95%;
   background: var(--button-hover-bg);
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .blueprint-ai-sidebar__bubble--user {
@@ -89,4 +100,5 @@
   align-items: center;
   gap: 0.4rem;
   color: var(--text-primary-color);
+  flex-shrink: 0;
 }

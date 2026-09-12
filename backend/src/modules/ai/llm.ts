@@ -1,5 +1,5 @@
 import { createOpenAI } from "@ai-sdk/openai";
-import { APICallError, generateText, streamText } from "ai";
+import { APICallError, createTextStreamResponse, generateText, streamText, toTextStream } from "ai";
 
 import { HttpError } from "../errors.js";
 import { getAiApiKey, getAiBaseUrl, getAiModels, isAiConfigured } from "./config.js";
@@ -79,11 +79,10 @@ export async function completeText(options: {
   throw toHttpError(lastError);
 }
 
-export async function streamCompletion(options: {
+export function streamTextResponse(options: {
   system: string;
   messages: { role: "user" | "assistant"; content: string }[];
-  onToken: (text: string) => Promise<void>;
-}): Promise<string> {
+}): Response {
   if (!isAiConfigured()) {
     throw new HttpError(503, "AI is not configured. Set AI_API_KEY.");
   }
@@ -93,32 +92,21 @@ export async function streamCompletion(options: {
   }
 
   const openai = provider();
-  let lastError: unknown;
+  const result = streamText({
+    model: openai.chat(models[0]),
+    system: options.system,
+    messages: options.messages.map((message) => ({
+      role: message.role,
+      content: message.content,
+    })),
+    timeout: 60_000,
+  });
 
-  for (const modelId of models) {
-    try {
-      const result = streamText({
-        model: openai.chat(modelId),
-        system: options.system,
-        messages: options.messages.map((message) => ({
-          role: message.role,
-          content: message.content,
-        })),
-        timeout: 60_000,
-      });
-
-      let full = "";
-      for await (const chunk of result.textStream) {
-        full += chunk;
-        await options.onToken(chunk);
-      }
-      return full;
-    } catch (error) {
-      lastError = error;
-      if (!isProviderFailure(error)) {
-        throw toHttpError(error);
-      }
-    }
-  }
-  throw toHttpError(lastError);
+  return createTextStreamResponse({
+    headers: {
+      "Cache-Control": "no-cache, no-transform",
+      "X-Accel-Buffering": "no",
+    },
+    stream: toTextStream({ stream: result.stream }),
+  });
 }

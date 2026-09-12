@@ -1,3 +1,5 @@
+import { extractMermaid, stripMermaidFences } from "./mermaidParse";
+
 export interface AiHealth {
   configured: boolean;
   models: string[];
@@ -59,48 +61,25 @@ export async function streamAi(
 
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
-  let buffer = "";
-  let donePayload: StreamDone | null = null;
-
-  const consume = (chunk: string) => {
-    const events = chunk.split("\n\n");
-    for (const event of events) {
-      const line = event
-        .split("\n")
-        .filter((l) => l.startsWith("data:"))
-        .map((l) => l.slice(5).trim())
-        .join("");
-      if (!line) continue;
-      const payload = JSON.parse(line) as
-        | { type: "token"; text: string }
-        | { type: "done"; reply: string; mermaid?: string | null }
-        | { type: "error"; detail: string };
-      if (payload.type === "token") {
-        onToken(payload.text);
-      } else if (payload.type === "done") {
-        donePayload = { reply: payload.reply, mermaid: payload.mermaid ?? null };
-      } else if (payload.type === "error") {
-        throw new Error(payload.detail);
-      }
-    }
-  };
+  let full = "";
 
   while (true) {
     const { value, done } = await reader.read();
-    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
-    const parts = buffer.split("\n\n");
-    buffer = parts.pop() ?? "";
-    if (parts.length > 0) {
-      consume(parts.join("\n\n") + "\n\n");
-    }
-    if (done) {
-      if (buffer.trim()) consume(buffer);
-      break;
-    }
+    if (done) break;
+    const chunk = decoder.decode(value, { stream: true });
+    if (!chunk) continue;
+    full += chunk;
+    onToken(chunk);
+  }
+  full += decoder.decode();
+
+  if (path === "/api/ai/summarize/stream") {
+    return { reply: full.trim(), mermaid: null };
   }
 
-  if (!donePayload) {
-    throw new Error("Stream ended without a done event");
-  }
-  return donePayload;
+  const mermaid = extractMermaid(full);
+  return {
+    reply: mermaid ? stripMermaidFences(full) : full.trim(),
+    mermaid,
+  };
 }

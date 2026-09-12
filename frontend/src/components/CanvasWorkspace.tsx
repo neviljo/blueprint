@@ -119,6 +119,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
   const [workspaceId, setWorkspaceId] = useState<string | null>(null);
   const [editorTheme, setEditorTheme] = useState<"dark" | "light">("dark");
   const [isCollaborating, setIsCollaborating] = useState(false);
+  const [aiSidebarOpen, setAiSidebarOpen] = useState(false);
   const [collabStatus, setCollabStatus] = useState<
     "connecting" | "live" | "reconnecting" | "offline"
   >("connecting");
@@ -668,6 +669,8 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
     appState: AppState
   ) => {
     setEditorTheme(appState.theme === "light" ? "light" : "dark");
+    const sidebarOpen = appState.openSidebar?.name === "ai";
+    setAiSidebarOpen((prev) => (prev === sidebarOpen ? prev : sidebarOpen));
 
     // Version diff already ignores remote-applied elements (map is updated
     // before updateScene). Do not mute onChange with a timer — that dropped
@@ -855,9 +858,11 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
             const api = excalidrawRef.current;
             if (!api) return;
             const open = api.getAppState().openSidebar;
+            const nextOpen = open?.name === "ai" ? null : { name: "ai" as const, tab: "chat" };
+            setAiSidebarOpen(nextOpen !== null);
             api.updateScene({
               appState: {
-                openSidebar: open?.name === "ai" ? null : { name: "ai", tab: "chat" },
+                openSidebar: nextOpen,
               },
             });
           }}
@@ -902,6 +907,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
       </Tooltip>
 
       {/* Realtime Collaboration Indicator & Participants Stack */}
+      {!aiSidebarOpen && (
       <Box
         sx={{
           position: "absolute",
@@ -1010,6 +1016,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
           ))}
         </AvatarGroup>
       </Box>
+      )}
 
       {/* Main Canvas Viewport */}
       <Box sx={{ flexGrow: 1, width: "100%", height: "100%", position: "relative" }}>
@@ -1063,7 +1070,11 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
                 }
               }}
             />
-            <Sidebar name="ai" className="blueprint-ai-sidebar">
+            <Sidebar
+              name="ai"
+              className="blueprint-ai-sidebar"
+              onStateChange={(state) => setAiSidebarOpen(state?.name === "ai")}
+            >
               <Sidebar.Header>AI</Sidebar.Header>
               <Sidebar.Tabs>
                 <Sidebar.TabTriggers>
@@ -1071,10 +1082,10 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
                   <Sidebar.TabTrigger tab="summarize">Summarize</Sidebar.TabTrigger>
                 </Sidebar.TabTriggers>
                 <Sidebar.Tab tab="chat">
-                  <AiPanel tab="chat" getApi={() => excalidrawRef.current} />
+                  <AiPanel tab="chat" canvasId={canvasId} getApi={() => excalidrawRef.current} />
                 </Sidebar.Tab>
                 <Sidebar.Tab tab="summarize">
-                  <AiPanel tab="summarize" getApi={() => excalidrawRef.current} />
+                  <AiPanel tab="summarize" canvasId={canvasId} getApi={() => excalidrawRef.current} />
                 </Sidebar.Tab>
               </Sidebar.Tabs>
             </Sidebar>
