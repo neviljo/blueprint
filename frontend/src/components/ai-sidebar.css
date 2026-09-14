@@ -1,7 +1,29 @@
+.excalidraw .sidebar.blueprint-ai-sidebar {
+  width: var(--blueprint-ai-sidebar-width, 320px);
+  max-width: min(70vw, 720px);
+}
+
 .excalidraw .sidebar.blueprint-ai-sidebar .sidebar-tabs-root,
 .excalidraw .sidebar.blueprint-ai-sidebar [role="tabpanel"] {
   min-height: 0;
   overflow: hidden;
+}
+
+.excalidraw .sidebar.blueprint-ai-sidebar .blueprint-ai-sidebar__resize {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 8px;
+  cursor: ew-resize;
+  z-index: 20;
+  touch-action: none;
+}
+
+.excalidraw .sidebar.blueprint-ai-sidebar .blueprint-ai-sidebar__resize:hover,
+.excalidraw .sidebar.blueprint-ai-sidebar .blueprint-ai-sidebar__resize:active {
+  background: var(--color-primary);
+  opacity: 0.35;
 }
 
 .blueprint-ai-sidebar {
@@ -27,6 +49,8 @@
 .blueprint-ai-sidebar textarea,
 .blueprint-ai-sidebar input[type="text"] {
   width: 100%;
+  max-width: 100%;
+  min-width: 0;
   box-sizing: border-box;
   flex-shrink: 0;
   resize: vertical;
@@ -38,12 +62,17 @@
   font: inherit;
 }
 
-.blueprint-ai-sidebar__composer {
+.excalidraw .sidebar.blueprint-ai-sidebar textarea.blueprint-ai-sidebar__composer {
   min-height: 4.5rem;
   max-height: 10rem;
+  max-width: 100%;
+  min-width: 0;
+  width: 100%;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   word-break: break-word;
+  overflow-x: hidden;
+  overflow-y: auto;
   line-height: 1.4;
 }
 
@@ -89,9 +118,12 @@
   border-radius: 0.65rem;
   padding: 0.5rem 0.65rem;
   max-width: 95%;
+  min-width: 0;
   background: var(--button-hover-bg);
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
   word-break: break-word;
+  overflow-x: hidden;
 }
 
 .blueprint-ai-sidebar__bubble--user {

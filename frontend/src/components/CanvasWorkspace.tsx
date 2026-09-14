@@ -113,6 +113,23 @@ function splitElements(elements: readonly ExcalidrawElement[]): ExcalidrawElemen
   return parts;
 }
 
+const AI_SIDEBAR_MIN = 280;
+const AI_SIDEBAR_MAX = 720;
+const AI_SIDEBAR_DEFAULT = 320;
+const AI_SIDEBAR_WIDTH_KEY = "blueprint-ai-sidebar-width";
+
+function readAiSidebarWidth(): number {
+  try {
+    const stored = Number(localStorage.getItem(AI_SIDEBAR_WIDTH_KEY));
+    if (Number.isFinite(stored) && stored >= AI_SIDEBAR_MIN && stored <= AI_SIDEBAR_MAX) {
+      return stored;
+    }
+  } catch {
+    /* ignore */
+  }
+  return AI_SIDEBAR_DEFAULT;
+}
+
 export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
   const [loading, setLoading] = useState(true);
   const [initialData, setInitialData] = useState<CanvasContent | null>(null);
@@ -120,6 +137,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
   const [editorTheme, setEditorTheme] = useState<"dark" | "light">("dark");
   const [isCollaborating, setIsCollaborating] = useState(false);
   const [aiSidebarOpen, setAiSidebarOpen] = useState(false);
+  const [aiSidebarWidth, setAiSidebarWidth] = useState(readAiSidebarWidth);
   const [collabStatus, setCollabStatus] = useState<
     "connecting" | "live" | "reconnecting" | "offline"
   >("connecting");
@@ -813,6 +831,32 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
     saveCanvasContent(currentContentRef.current.elements, updatedAppState);
   }, [editorTheme, sendPayload, saveCanvasContent]);
 
+  const onAiSidebarResize = useCallback((event: { preventDefault: () => void; stopPropagation: () => void; clientX: number }) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const startX = event.clientX;
+    const startWidth = aiSidebarWidth;
+    const max = Math.min(AI_SIDEBAR_MAX, Math.round(window.innerWidth * 0.7));
+    const move = (next: PointerEvent) => {
+      const width = Math.min(max, Math.max(AI_SIDEBAR_MIN, startWidth + (startX - next.clientX)));
+      setAiSidebarWidth(width);
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  }, [aiSidebarWidth]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(AI_SIDEBAR_WIDTH_KEY, String(aiSidebarWidth));
+    } catch {
+      /* ignore */
+    }
+  }, [aiSidebarWidth]);
+
   return (
     <Box
       sx={{
@@ -823,6 +867,7 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
         bgcolor: "#121212",
         color: "#ECECEC",
         overflow: "hidden",
+        "--blueprint-ai-sidebar-width": `${aiSidebarWidth}px`,
       }}
     >
       {/* Floating Back Button */}
@@ -1075,6 +1120,11 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
               className="blueprint-ai-sidebar"
               onStateChange={(state) => setAiSidebarOpen(state?.name === "ai")}
             >
+              <div
+                className="blueprint-ai-sidebar__resize"
+                onPointerDown={onAiSidebarResize}
+                title="Drag to resize"
+              />
               <Sidebar.Header>AI</Sidebar.Header>
               <Sidebar.Tabs>
                 <Sidebar.TabTriggers>

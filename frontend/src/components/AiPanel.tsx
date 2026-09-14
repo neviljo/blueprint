@@ -272,6 +272,7 @@ export default function AiPanel({ tab, canvasId, getApi }: AiPanelProps) {
               value={chatInput}
               disabled={chatBusy}
               rows={3}
+              wrap="soft"
               onChange={(e) => setChatInput(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
