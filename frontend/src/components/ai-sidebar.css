@@ -7,6 +7,9 @@
 .excalidraw .sidebar.blueprint-ai-sidebar [role="tabpanel"] {
   min-height: 0;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
 }
 
 .excalidraw .sidebar.blueprint-ai-sidebar .blueprint-ai-sidebar__resize {
@@ -104,26 +107,32 @@
 
 .blueprint-ai-sidebar__chat,
 .blueprint-ai-sidebar__summary {
-  flex: 1 1 0;
+  flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
   display: flex;
   flex-direction: column;
+  justify-content: flex-start;
+  align-items: stretch;
   gap: 0.5rem;
   overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
 }
 
 .blueprint-ai-sidebar__bubble {
+  flex: 0 0 auto;
   border-radius: 0.65rem;
   padding: 0.5rem 0.65rem;
   max-width: 95%;
   min-width: 0;
+  min-height: auto;
+  height: auto;
   background: var(--button-hover-bg);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   word-break: break-word;
-  overflow-x: hidden;
+  overflow: visible;
 }
 
 .blueprint-ai-sidebar__bubble--user {

@@ -51,6 +51,7 @@ export default function AiPanel({ tab, canvasId, getApi }: AiPanelProps) {
   const [summarizeError, setSummarizeError] = useState<string | null>(null);
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const summaryScrollRef = useRef<HTMLDivElement>(null);
+  const stickToBottomRef = useRef(true);
 
   useEffect(() => {
     let cancelled = false;
@@ -72,9 +73,21 @@ export default function AiPanel({ tab, canvasId, getApi }: AiPanelProps) {
     };
   }, []);
 
+  const onTranscriptScroll = useCallback((event: { currentTarget: HTMLDivElement }) => {
+    const node = event.currentTarget;
+    stickToBottomRef.current =
+      node.scrollHeight - node.scrollTop - node.clientHeight < 96;
+  }, []);
+
+  const onTranscriptWheel = useCallback((event: { stopPropagation: () => void }) => {
+    event.stopPropagation();
+  }, []);
+
   useEffect(() => {
     const node = tab === "chat" ? chatScrollRef.current : summaryScrollRef.current;
-    if (node) node.scrollTop = node.scrollHeight;
+    if (node && stickToBottomRef.current) {
+      node.scrollTop = node.scrollHeight;
+    }
   }, [tab, session.chatTurns, session.summarizeTurns]);
 
   const applyMermaid = useCallback(
@@ -97,6 +110,7 @@ export default function AiPanel({ tab, canvasId, getApi }: AiPanelProps) {
       { role: "user", content: text },
     ];
     setChatInput("");
+    stickToBottomRef.current = true;
     patchAiSession(canvasId, {
       chatTurns: [...history, { role: "assistant", content: "", pending: true }],
     });
@@ -181,6 +195,7 @@ export default function AiPanel({ tab, canvasId, getApi }: AiPanelProps) {
     if (!api || summarizeBusy) return;
     setSummarizeBusy(true);
     setSummarizeError(null);
+    stickToBottomRef.current = true;
     const history = session.summarizeTurns.filter((turn) => !turn.pending);
     const pending: ChatTurn[] = [
       ...history,
@@ -236,7 +251,12 @@ export default function AiPanel({ tab, canvasId, getApi }: AiPanelProps) {
 
         {tab === "chat" && (
           <>
-            <div className="blueprint-ai-sidebar__chat" ref={chatScrollRef}>
+            <div
+              className="blueprint-ai-sidebar__chat"
+              ref={chatScrollRef}
+              onScroll={onTranscriptScroll}
+              onWheel={onTranscriptWheel}
+            >
               {session.chatTurns.map((turn, i) => (
                 <div
                   key={i}
@@ -295,7 +315,12 @@ export default function AiPanel({ tab, canvasId, getApi }: AiPanelProps) {
               {summarizeBusy ? "Summarizing…" : "Summarize drawing"}
             </button>
             {summarizeError && <p className="blueprint-ai-sidebar__error">{summarizeError}</p>}
-            <div className="blueprint-ai-sidebar__summary" ref={summaryScrollRef}>
+            <div
+              className="blueprint-ai-sidebar__summary"
+              ref={summaryScrollRef}
+              onScroll={onTranscriptScroll}
+              onWheel={onTranscriptWheel}
+            >
               {session.summarizeTurns.map((turn, i) => (
                 <div key={i} className="blueprint-ai-sidebar__bubble">
                   <SimpleMarkdown text={turn.content} />
