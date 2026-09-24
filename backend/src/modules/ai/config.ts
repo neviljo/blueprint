@@ -54,7 +54,7 @@ export function getAiModels(): string[] {
     if (parts.length > 0 && !parts.some((id) => id.toLowerCase().startsWith("gemini"))) {
       return parts;
     }
-    return ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"];
+    return ["llama-3.1-8b-instant", "llama-3.3-70b-versatile"];
   }
   const raw = process.env.AI_MODELS?.trim() || process.env.AI_MODEL?.trim() || "";
   return splitModels(raw);
