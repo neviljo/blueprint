@@ -16,15 +16,9 @@ function provider() {
   });
 }
 
-function withSearchSystem(system: string, useSearch: boolean | undefined): string {
-  if (!useSearch) return system;
+function withSearchSystem(system: string, useTools: boolean): string {
+  if (!useTools) return system;
   return `${system}\n\n${SEARCH_RULES}`;
-}
-
-function requireSearchReady(useSearch: boolean | undefined) {
-  if (useSearch && !isTavilyConfigured()) {
-    throw new HttpError(503, "Web search is not configured. Set TAVILY_API_KEY.");
-  }
 }
 
 function sleep(ms: number): Promise<void> {
@@ -53,6 +47,13 @@ function isTransient(error: unknown): boolean {
   return /timeout|ETIMEDOUT|ECONNRESET|fetch failed/i.test(message);
 }
 
+function isToolRequestFailure(error: unknown): boolean {
+  const status = statusOf(error);
+  if (status === 400) return true;
+  const message = error instanceof Error ? error.message : String(error);
+  return /invalid argument|function.?call|tool|schema|google_search/i.test(message);
+}
+
 function toHttpError(error: unknown): HttpError {
   if (error instanceof HttpError) return error;
   if (isRateLimited(error)) {
@@ -75,38 +76,33 @@ function toHttpError(error: unknown): HttpError {
   );
 }
 
-function callSettings(options: {
-  useSearch?: boolean;
-  tools?: ReturnType<typeof tavilySearchTools>;
-}) {
-  const tools = options.tools;
-  return tools ? { tools, stopWhen: stepCountIs(6) } : {};
-}
-
 async function generateWithBackoff(
   google: ReturnType<typeof createGoogleGenerativeAI>,
   modelId: string,
   options: {
     system: string;
     prompt: string;
-    useSearch?: boolean;
-    tools?: ReturnType<typeof tavilySearchTools>;
+    useTools: boolean;
   }
 ): Promise<string> {
   let lastError: unknown;
   const attempts = BACKOFF_MS.length + 1;
+  const tools = options.useTools ? tavilySearchTools() : undefined;
   for (let attempt = 0; attempt < attempts; attempt++) {
     if (attempt > 0) await sleep(BACKOFF_MS[attempt - 1]);
     try {
       const result = await generateText({
         model: google(modelId),
-        system: withSearchSystem(options.system, options.useSearch),
+        system: withSearchSystem(options.system, Boolean(tools)),
         prompt: options.prompt,
-        ...callSettings(options),
+        ...(tools ? { tools, stopWhen: stepCountIs(6) } : {}),
       });
       return result.text;
     } catch (error) {
       lastError = error;
+      if (tools && isToolRequestFailure(error)) {
+        return generateWithBackoff(google, modelId, { ...options, useTools: false });
+      }
       if (isRateLimited(error) || isTransient(error)) continue;
       throw error;
     }
@@ -117,7 +113,6 @@ async function generateWithBackoff(
 export async function completeText(options: {
   system: string;
   prompt: string;
-  useSearch?: boolean;
 }): Promise<string> {
   if (!isAiConfigured()) {
     throw new HttpError(503, "AI is not configured. Set AI_API_KEY.");
@@ -127,15 +122,14 @@ export async function completeText(options: {
     throw new HttpError(503, "AI is not configured. Set AI_MODEL or AI_MODELS.");
   }
 
-  requireSearchReady(options.useSearch);
   const release = acquireAiLock();
   try {
     const google = provider();
-    const tools = options.useSearch ? tavilySearchTools() : undefined;
+    const useTools = isTavilyConfigured();
     let lastError: unknown;
     for (const modelId of models) {
       try {
-        return await generateWithBackoff(google, modelId, { ...options, tools });
+        return await generateWithBackoff(google, modelId, { ...options, useTools });
       } catch (error) {
         lastError = error;
         if (isRateLimited(error)) {
@@ -156,7 +150,6 @@ export async function completeText(options: {
 export async function startTextStream(options: {
   system: string;
   messages: { role: "user" | "assistant"; content: string }[];
-  useSearch?: boolean;
 }) {
   if (!isAiConfigured()) {
     throw new HttpError(503, "AI is not configured. Set AI_API_KEY.");
@@ -166,9 +159,8 @@ export async function startTextStream(options: {
     throw new HttpError(503, "AI is not configured. Set AI_MODEL or AI_MODELS.");
   }
 
-  requireSearchReady(options.useSearch);
   const google = provider();
-  const tools = options.useSearch ? tavilySearchTools() : undefined;
+  const useTools = isTavilyConfigured();
   const messages = options.messages.map((message) => ({
     role: message.role,
     content: message.content,
@@ -177,29 +169,24 @@ export async function startTextStream(options: {
   const openStream = () =>
     streamText({
       model: google(models[0]),
-      system: withSearchSystem(options.system, options.useSearch),
+      system: options.system,
       messages,
-      ...callSettings({ useSearch: options.useSearch, tools }),
     });
 
   async function* textStream() {
     const release = acquireAiLock();
     try {
-      // Gemini streaming + function calls often yields no text or 400s.
-      // Run tool rounds with generateText, then emit the final answer.
-      if (tools) {
+      if (useTools) {
         let lastError: unknown;
+        const prompt = messages.map((m) => `${m.role}: ${m.content}`).join("\n\n");
         for (const modelId of models) {
           try {
-            const result = await generateWithBackoff(google, modelId, {
+            const text = await generateWithBackoff(google, modelId, {
               system: options.system,
-              prompt: messages
-                .map((message) => `${message.role}: ${message.content}`)
-                .join("\n\n"),
-              useSearch: options.useSearch,
-              tools,
+              prompt,
+              useTools: true,
             });
-            if (result) yield result;
+            if (text) yield text;
             return;
           } catch (error) {
             lastError = error;

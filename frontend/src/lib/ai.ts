@@ -27,16 +27,12 @@ export async function getAiHealth(): Promise<AiHealth> {
   return response.json() as Promise<AiHealth>;
 }
 
-export async function generateDiagram(
-  prompt: string,
-  repair = false,
-  useSearch = false
-): Promise<string> {
+export async function generateDiagram(prompt: string, repair = false): Promise<string> {
   const response = await fetch("/api/ai/diagram", {
     method: "POST",
     credentials: "include",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt, repair, useSearch }),
+    body: JSON.stringify({ prompt, repair }),
   });
   if (!response.ok) {
     throw new Error(await parseError(response));

@@ -10,14 +10,13 @@ export interface AiSession {
   chatTurns: ChatTurn[];
   summarizeTurns: ChatTurn[];
   selectionOnly: boolean;
-  useSearch: boolean;
 }
 
 const sessions = new Map<string, AiSession>();
 const listeners = new Set<() => void>();
 
 function emptySession(): AiSession {
-  return { chatTurns: [], summarizeTurns: [], selectionOnly: false, useSearch: false };
+  return { chatTurns: [], summarizeTurns: [], selectionOnly: false };
 }
 
 export function getAiSession(canvasId: string): AiSession {

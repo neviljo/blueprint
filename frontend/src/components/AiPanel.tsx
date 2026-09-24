@@ -120,7 +120,7 @@ export default function AiPanel({ tab, canvasId, getApi }: AiPanelProps) {
       const payload = history.map((turn) => ({ role: turn.role, content: turn.content }));
       const done = await streamAi(
         "/api/ai/chat/stream",
-        { messages: payload, dump, useSearch: session.useSearch },
+        { messages: payload, dump },
         (token) => {
         streamed += token;
         patchAiSession(canvasId, {
@@ -160,7 +160,6 @@ export default function AiPanel({ tab, canvasId, getApi }: AiPanelProps) {
     getApi,
     session.chatTurns,
     session.selectionOnly,
-    session.useSearch,
   ]);
 
   const handleApply = useCallback(
@@ -259,15 +258,6 @@ export default function AiPanel({ tab, canvasId, getApi }: AiPanelProps) {
           />
           Use selection only
         </label>
-        <label className="blueprint-ai-check" title="Allows Tavily web search when you ask for latest stacks or trends. Off by default.">
-          <input
-            type="checkbox"
-            checked={session.useSearch}
-            onChange={(e) => patchAiSession(canvasId, { useSearch: e.target.checked })}
-          />
-          Use latest web info
-        </label>
-
         {tab === "chat" && (
           <>
             <div

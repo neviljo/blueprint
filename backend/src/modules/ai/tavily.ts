@@ -8,27 +8,32 @@ export function tavilySearchTools() {
   return {
     tavilySearch: tool({
       description:
-        "Search the live web for current facts, latest stacks, products, and trends. Skip it for generic diagram edits.",
-      // Plain JSON Schema: Gemini rejects Zod 4 output ($schema / extra keywords).
+        "Search the live web. Call this when you need current facts, versions, products, news, or trends. Skip it for generic diagram edits or questions already answered by the diagram dump.",
       inputSchema: jsonSchema<{ query: string }>({
         type: "object",
         properties: {
           query: {
             type: "string",
-            description: "Search query under 400 characters",
+            description: "Short search query, under 400 characters",
           },
         },
         required: ["query"],
         additionalProperties: false,
       }),
       execute: async ({ query }) => {
+        const q = String(query ?? "").replace(/\s+/g, " ").trim().slice(0, 400);
+        if (!q) {
+          return { query: "", results: [], error: "Empty query" };
+        }
         try {
-          const response = await client.search(query.slice(0, 400), {
+          const response = await client.search(q, {
             searchDepth: "basic",
             maxResults: 5,
+            includeAnswer: true,
           });
           return {
-            query: response.query ?? query,
+            query: response.query ?? q,
+            answer: response.answer ?? null,
             results: (response.results ?? []).map((item) => ({
               title: item.title,
               url: item.url,
@@ -37,7 +42,7 @@ export function tavilySearchTools() {
           };
         } catch (error) {
           return {
-            query,
+            query: q,
             results: [],
             error: error instanceof Error ? error.message : "Tavily search failed",
           };

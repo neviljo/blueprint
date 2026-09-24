@@ -5,7 +5,7 @@ import { z } from "zod";
 
 import { requireAuth } from "../auth/middleware.js";
 import { HttpError } from "../errors.js";
-import { getAiModels, isAiConfigured, isTavilyConfigured } from "./config.js";
+import { getAiModels, isAiConfigured } from "./config.js";
 import { completeText, startTextStream } from "./llm.js";
 import { extractMermaid, stripMermaidFences } from "./mermaid.js";
 import {
@@ -44,16 +44,14 @@ router.get("/health", requireAuth, (c) => {
   return c.json({
     configured: isAiConfigured() && getAiModels().length > 0,
     models: getAiModels(),
-    searchConfigured: isTavilyConfigured(),
   });
 });
 
 router.post("/diagram", requireAuth, zValidator("json", diagramSchema), async (c) => {
-  const { prompt, repair, useSearch } = c.req.valid("json");
+  const { prompt, repair } = c.req.valid("json");
   const text = await completeText({
     system: repair ? GENERATE_REPAIR_SYSTEM : GENERATE_SYSTEM,
     prompt,
-    useSearch,
   });
   const mermaid = extractMermaid(text);
   if (!mermaid) {
@@ -63,7 +61,7 @@ router.post("/diagram", requireAuth, zValidator("json", diagramSchema), async (c
 });
 
 router.post("/chat", requireAuth, zValidator("json", chatSchema), async (c) => {
-  const { messages, dump, useSearch } = c.req.valid("json");
+  const { messages, dump } = c.req.valid("json");
   const prompt = [
     dump ? `Diagram dump:\n${dump}` : "Diagram dump: (empty)",
     ...messages.map((m) => `${m.role}: ${m.content}`),
@@ -71,7 +69,6 @@ router.post("/chat", requireAuth, zValidator("json", chatSchema), async (c) => {
   const text = await completeText({
     system: CHAT_SYSTEM,
     prompt,
-    useSearch,
   });
   const mermaid = extractMermaid(text);
   return c.json({
@@ -81,11 +78,10 @@ router.post("/chat", requireAuth, zValidator("json", chatSchema), async (c) => {
 });
 
 router.post("/chat/stream", requireAuth, zValidator("json", chatSchema), async (c) => {
-  const { messages, dump, useSearch } = c.req.valid("json");
+  const { messages, dump } = c.req.valid("json");
   const result = await startTextStream({
     system: `${CHAT_SYSTEM}\n\nDiagram dump:\n${dump || "(empty)"}`,
     messages,
-    useSearch,
   });
   c.header("Cache-Control", "no-cache, no-transform");
   c.header("X-Accel-Buffering", "no");
