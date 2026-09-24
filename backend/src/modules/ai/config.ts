@@ -19,9 +19,8 @@ export function isGroqConfigured(): boolean {
 
 export function getAiProvider(): AiProvider {
   const raw = process.env.AI_PROVIDER?.trim().toLowerCase();
-  if (raw === "groq") return "groq";
   if (raw === "google" || raw === "gemini") return "google";
-  if (isGoogleConfigured()) return "google";
+  if (raw === "groq") return "groq";
   if (isGroqConfigured()) return "groq";
   return "google";
 }
