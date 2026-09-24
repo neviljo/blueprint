@@ -7,8 +7,7 @@ import { acquireAiLock } from "./lock.js";
 import { SEARCH_RULES } from "./prompts.js";
 import { tavilySearchTools } from "./tavily.js";
 
-const BACKOFF_MS = [1000, 2000, 4000];
-const STREAM_RETRY_MS = 2000;
+const BACKOFF_MS = [1000, 2000];
 
 function provider() {
   return createGoogleGenerativeAI({
@@ -59,6 +58,10 @@ function isToolRequestFailure(error: unknown): boolean {
   return /invalid argument|function.?call|tool call|schema/i.test(message);
 }
 
+function shouldTryNextModel(error: unknown): boolean {
+  return isRateLimited(error) || isMissingModel(error) || isTransient(error);
+}
+
 function toHttpError(error: unknown): HttpError {
   if (error instanceof HttpError) return error;
   if (isRateLimited(error)) {
@@ -107,7 +110,8 @@ async function generateWithBackoff(
       if (options.useTools && isToolRequestFailure(error)) {
         return generateWithBackoff(google, modelId, { ...options, useTools: false });
       }
-      if (isRateLimited(error) || isTransient(error)) continue;
+      if (isRateLimited(error) || isMissingModel(error)) throw error;
+      if (isTransient(error)) continue;
       throw error;
     }
   }
@@ -136,12 +140,7 @@ export async function completeText(options: {
         return await generateWithBackoff(google, modelId, { ...options, useTools });
       } catch (error) {
         lastError = error;
-        if (isRateLimited(error)) {
-          throw toHttpError(error);
-        }
-        if (isMissingModel(error) || isTransient(error)) {
-          continue;
-        }
+        if (shouldTryNextModel(error)) continue;
         throw toHttpError(error);
       }
     }
@@ -170,13 +169,6 @@ export async function startTextStream(options: {
     content: message.content,
   }));
 
-  const openStream = () =>
-    streamText({
-      model: google(models[0]),
-      system: options.system,
-      messages,
-    });
-
   async function* textStream() {
     const release = acquireAiLock();
     try {
@@ -194,29 +186,35 @@ export async function startTextStream(options: {
             return;
           } catch (error) {
             lastError = error;
-            if (isRateLimited(error)) throw toHttpError(error);
-            if (isMissingModel(error) || isTransient(error)) continue;
+            if (shouldTryNextModel(error)) continue;
             throw toHttpError(error);
           }
         }
         throw toHttpError(lastError);
       }
 
-      let received = false;
-      try {
-        for await (const delta of openStream().textStream) {
-          received = true;
-          yield delta;
-        }
-      } catch (error) {
-        if (received || !(isRateLimited(error) || isTransient(error))) {
+      let lastError: unknown;
+      for (const modelId of models) {
+        let yielded = false;
+        try {
+          const stream = streamText({
+            model: google(modelId),
+            system: options.system,
+            messages,
+          });
+          for await (const delta of stream.textStream) {
+            yielded = true;
+            yield delta;
+          }
+          return;
+        } catch (error) {
+          lastError = error;
+          if (yielded) throw toHttpError(error);
+          if (shouldTryNextModel(error)) continue;
           throw toHttpError(error);
         }
-        await sleep(STREAM_RETRY_MS);
-        for await (const delta of openStream().textStream) {
-          yield delta;
-        }
       }
+      throw toHttpError(lastError);
     } finally {
       release();
     }
