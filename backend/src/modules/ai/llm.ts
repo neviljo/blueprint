@@ -34,10 +34,20 @@ function statusOf(error: unknown): number {
   return 0;
 }
 
+function errorText(error: unknown): string {
+  if (error instanceof Error) {
+    const nested =
+      "cause" in error && error.cause instanceof Error ? error.cause.message : "";
+    return `${error.message} ${nested}`;
+  }
+  return String(error);
+}
+
 function isRateLimited(error: unknown): boolean {
   if (statusOf(error) === 429) return true;
-  const message = error instanceof Error ? error.message : String(error);
-  return /429|too many requests|resource.?exhausted|rate.?limit/i.test(message);
+  return /429|too many requests|resource.?exhausted|rate.?limit|high demand|overloaded|unavailable|try again later|failed after \d+ attempts/i.test(
+    errorText(error)
+  );
 }
 
 function isMissingModel(error: unknown): boolean {
@@ -102,6 +112,7 @@ async function generateWithBackoff(
         model: google(modelId),
         system: withSearchSystem(options.system, options.useTools),
         prompt: options.prompt,
+        maxRetries: 0,
         ...toolSettings(options.useTools),
       });
       return result.text;
@@ -121,6 +132,7 @@ async function generateWithBackoff(
 export async function completeText(options: {
   system: string;
   prompt: string;
+  allowTools?: boolean;
 }): Promise<string> {
   if (!isAiConfigured()) {
     throw new HttpError(503, "AI is not configured. Set AI_API_KEY.");
@@ -133,7 +145,7 @@ export async function completeText(options: {
   const release = acquireAiLock();
   try {
     const google = provider();
-    const useTools = isTavilyConfigured();
+    const useTools = options.allowTools !== false && isTavilyConfigured();
     let lastError: unknown;
     for (const modelId of models) {
       try {
@@ -153,6 +165,7 @@ export async function completeText(options: {
 export async function startTextStream(options: {
   system: string;
   messages: { role: "user" | "assistant"; content: string }[];
+  allowTools?: boolean;
 }) {
   if (!isAiConfigured()) {
     throw new HttpError(503, "AI is not configured. Set AI_API_KEY.");
@@ -163,7 +176,7 @@ export async function startTextStream(options: {
   }
 
   const google = provider();
-  const useTools = isTavilyConfigured();
+  const useTools = options.allowTools !== false && isTavilyConfigured();
   const messages = options.messages.map((message) => ({
     role: message.role,
     content: message.content,
@@ -201,6 +214,7 @@ export async function startTextStream(options: {
             model: google(modelId),
             system: options.system,
             messages,
+            maxRetries: 0,
           });
           for await (const delta of stream.textStream) {
             yielded = true;

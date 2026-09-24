@@ -97,6 +97,7 @@ router.post("/summarize", requireAuth, zValidator("json", summarizeSchema), asyn
   const text = await completeText({
     system: SUMMARIZE_SYSTEM,
     prompt: dump,
+    allowTools: false,
   });
   return c.json({ reply: text.trim() });
 });
@@ -106,6 +107,7 @@ router.post("/summarize/stream", requireAuth, zValidator("json", summarizeSchema
   const result = await startTextStream({
     system: SUMMARIZE_SYSTEM,
     messages: [{ role: "user", content: dump }],
+    allowTools: false,
   });
   c.header("Cache-Control", "no-cache, no-transform");
   c.header("X-Accel-Buffering", "no");
