@@ -1,9 +1,10 @@
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
-import { APICallError, generateText, streamText } from "ai";
+import { APICallError, generateText, stepCountIs, streamText } from "ai";
 
 import { HttpError } from "../errors.js";
-import { getAiApiKey, getAiModels, isAiConfigured } from "./config.js";
+import { getAiApiKey, getAiModels, isAiConfigured, isTavilyConfigured } from "./config.js";
 import { SEARCH_RULES } from "./prompts.js";
+import { tavilySearchTools } from "./tavily.js";
 
 function provider() {
   return createGoogleGenerativeAI({
@@ -16,10 +17,10 @@ function withSearchSystem(system: string, useSearch: boolean | undefined): strin
   return `${system}\n\n${SEARCH_RULES}`;
 }
 
-function searchTools(google: ReturnType<typeof createGoogleGenerativeAI>) {
-  return {
-    google_search: google.tools.googleSearch({}),
-  };
+function requireSearchReady(useSearch: boolean | undefined) {
+  if (useSearch && !isTavilyConfigured()) {
+    throw new HttpError(503, "Web search is not configured. Set TAVILY_API_KEY.");
+  }
 }
 
 function isProviderFailure(error: unknown): boolean {
@@ -70,8 +71,9 @@ export async function completeText(options: {
     throw new HttpError(503, "AI is not configured. Set AI_MODEL or AI_MODELS.");
   }
 
+  requireSearchReady(options.useSearch);
   const google = provider();
-  const tools = options.useSearch ? searchTools(google) : undefined;
+  const tools = options.useSearch ? tavilySearchTools() : undefined;
   let lastError: unknown;
   for (const modelId of models) {
     try {
@@ -79,8 +81,8 @@ export async function completeText(options: {
         model: google(modelId),
         system: withSearchSystem(options.system, options.useSearch),
         prompt: options.prompt,
-        timeout: 60_000,
-        ...(tools ? { tools } : {}),
+        timeout: tools ? 90_000 : 60_000,
+        ...(tools ? { tools, stopWhen: stepCountIs(4) } : {}),
       });
       return result.text;
     } catch (error) {
@@ -106,8 +108,9 @@ export function startTextStream(options: {
     throw new HttpError(503, "AI is not configured. Set AI_MODEL or AI_MODELS.");
   }
 
+  requireSearchReady(options.useSearch);
   const google = provider();
-  const tools = options.useSearch ? searchTools(google) : undefined;
+  const tools = options.useSearch ? tavilySearchTools() : undefined;
   return streamText({
     model: google(models[0]),
     system: withSearchSystem(options.system, options.useSearch),
@@ -115,7 +118,7 @@ export function startTextStream(options: {
       role: message.role,
       content: message.content,
     })),
-    timeout: 60_000,
-    ...(tools ? { tools } : {}),
+    timeout: tools ? 90_000 : 60_000,
+    ...(tools ? { tools, stopWhen: stepCountIs(4) } : {}),
   });
 }

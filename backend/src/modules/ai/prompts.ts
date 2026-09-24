@@ -24,4 +24,4 @@ ${MERMAID_RULES}`;
 export const SUMMARIZE_SYSTEM = `Write a short markdown summary of the diagram dump.
 Use **bold** and bullet lists (* or -). No mermaid. No extra preamble.`;
 
-export const SEARCH_RULES = `Web search is available for this request. Use it only when the user asks for latest, current, trending, or real-world stack facts. Skip search for generic diagram edits or questions answered by the diagram dump. Never put citations, URLs, source lists, or extra commentary inside a mermaid fence. If mermaid is required, still follow the mermaid rules exactly.`;
+export const SEARCH_RULES = `Tavily web search is available for this request. Use tavilySearch only when the user asks for latest, current, trending, or real-world stack facts. Skip search for generic diagram edits or questions answered by the diagram dump. Never put citations, URLs, source lists, or extra commentary inside a mermaid fence. If mermaid is required, still follow the mermaid rules exactly.`;

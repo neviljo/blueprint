@@ -259,7 +259,7 @@ export default function AiPanel({ tab, canvasId, getApi }: AiPanelProps) {
           />
           Use selection only
         </label>
-        <label className="blueprint-ai-check" title="Allows Google Search when you ask for latest stacks or trends. Off by default.">
+        <label className="blueprint-ai-check" title="Allows Tavily web search when you ask for latest stacks or trends. Off by default.">
           <input
             type="checkbox"
             checked={session.useSearch}
