@@ -27,6 +27,20 @@ export async function getAiHealth(): Promise<AiHealth> {
   return response.json() as Promise<AiHealth>;
 }
 
+export async function summarizeDiagram(dump: string): Promise<string> {
+  const response = await fetch("/api/ai/summarize", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ dump }),
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+  const data = (await response.json()) as { reply: string };
+  return data.reply;
+}
+
 export async function generateDiagram(prompt: string, repair = false): Promise<string> {
   const response = await fetch("/api/ai/diagram", {
     method: "POST",

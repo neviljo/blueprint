@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
-import { getAiHealth, streamAi } from "../lib/ai";
+import { getAiHealth, streamAi, summarizeDiagram } from "../lib/ai";
 import { dumpElements, sceneElementIds } from "../lib/dumpElements";
 import { insertGeneratedElements } from "../lib/insertGeneratedElements";
 import { mermaidToElements } from "../lib/mermaidToScene";
@@ -214,15 +214,9 @@ export default function AiPanel({ tab, canvasId, getApi }: AiPanelProps) {
     patchAiSession(canvasId, { summarizeTurns: pending });
     try {
       const { dump } = currentDump(api, session.selectionOnly);
-      let streamed = "";
-      const done = await streamAi("/api/ai/summarize/stream", { dump }, (token) => {
-        streamed += token;
-        patchAiSession(canvasId, {
-          summarizeTurns: [...history, { role: "assistant", content: streamed, pending: true }],
-        });
-      });
+      const reply = await summarizeDiagram(dump);
       patchAiSession(canvasId, {
-        summarizeTurns: [...history, { role: "assistant", content: done.reply, pending: false }],
+        summarizeTurns: [...history, { role: "assistant", content: reply, pending: false }],
       });
     } catch (error) {
       setSummarizeError(error instanceof Error ? error.message : "Summarize failed");
