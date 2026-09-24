@@ -1,8 +1,14 @@
-import { createGoogleGenerativeAI } from "@ai-sdk/google";
+import { createOpenAI } from "@ai-sdk/openai";
 import { APICallError, generateText, stepCountIs, streamText } from "ai";
 
 import { HttpError } from "../errors.js";
-import { getAiApiKey, getAiModels, isAiConfigured, isTavilyConfigured } from "./config.js";
+import {
+  getAiApiKey,
+  getAiBaseUrl,
+  getAiModels,
+  isAiConfigured,
+  isTavilyConfigured,
+} from "./config.js";
 import { acquireAiLock } from "./lock.js";
 import { SEARCH_RULES } from "./prompts.js";
 import { tavilySearchTools } from "./tavily.js";
@@ -11,14 +17,21 @@ const BACKOFF_MS = [1000, 2000, 4000];
 const STREAM_RETRY_MS = 2000;
 
 function provider() {
-  return createGoogleGenerativeAI({
+  return createOpenAI({
     apiKey: getAiApiKey(),
+    baseURL: getAiBaseUrl(),
+    name: "gemini",
   });
 }
 
 function withSearchSystem(system: string, useTools: boolean): string {
   if (!useTools) return system;
   return `${system}\n\n${SEARCH_RULES}`;
+}
+
+function toolSettings(useTools: boolean) {
+  if (!useTools) return {};
+  return { tools: tavilySearchTools(), stopWhen: stepCountIs(6) };
 }
 
 function sleep(ms: number): Promise<void> {
@@ -51,7 +64,7 @@ function isToolRequestFailure(error: unknown): boolean {
   const status = statusOf(error);
   if (status === 400) return true;
   const message = error instanceof Error ? error.message : String(error);
-  return /invalid argument|function.?call|tool|schema|google_search/i.test(message);
+  return /invalid argument|function.?call|tool|schema/i.test(message);
 }
 
 function toHttpError(error: unknown): HttpError {
@@ -77,7 +90,7 @@ function toHttpError(error: unknown): HttpError {
 }
 
 async function generateWithBackoff(
-  google: ReturnType<typeof createGoogleGenerativeAI>,
+  openai: ReturnType<typeof createOpenAI>,
   modelId: string,
   options: {
     system: string;
@@ -87,21 +100,20 @@ async function generateWithBackoff(
 ): Promise<string> {
   let lastError: unknown;
   const attempts = BACKOFF_MS.length + 1;
-  const tools = options.useTools ? tavilySearchTools() : undefined;
   for (let attempt = 0; attempt < attempts; attempt++) {
     if (attempt > 0) await sleep(BACKOFF_MS[attempt - 1]);
     try {
       const result = await generateText({
-        model: google(modelId),
-        system: withSearchSystem(options.system, Boolean(tools)),
+        model: openai.chat(modelId),
+        system: withSearchSystem(options.system, options.useTools),
         prompt: options.prompt,
-        ...(tools ? { tools, stopWhen: stepCountIs(6) } : {}),
+        ...toolSettings(options.useTools),
       });
       return result.text;
     } catch (error) {
       lastError = error;
-      if (tools && isToolRequestFailure(error)) {
-        return generateWithBackoff(google, modelId, { ...options, useTools: false });
+      if (options.useTools && isToolRequestFailure(error)) {
+        return generateWithBackoff(openai, modelId, { ...options, useTools: false });
       }
       if (isRateLimited(error) || isTransient(error)) continue;
       throw error;
@@ -124,12 +136,12 @@ export async function completeText(options: {
 
   const release = acquireAiLock();
   try {
-    const google = provider();
+    const openai = provider();
     const useTools = isTavilyConfigured();
     let lastError: unknown;
     for (const modelId of models) {
       try {
-        return await generateWithBackoff(google, modelId, { ...options, useTools });
+        return await generateWithBackoff(openai, modelId, { ...options, useTools });
       } catch (error) {
         lastError = error;
         if (isRateLimited(error)) {
@@ -159,57 +171,43 @@ export async function startTextStream(options: {
     throw new HttpError(503, "AI is not configured. Set AI_MODEL or AI_MODELS.");
   }
 
-  const google = provider();
+  const openai = provider();
   const useTools = isTavilyConfigured();
   const messages = options.messages.map((message) => ({
     role: message.role,
     content: message.content,
   }));
 
-  const openStream = () =>
+  const openStream = (withTools: boolean) =>
     streamText({
-      model: google(models[0]),
-      system: options.system,
+      model: openai.chat(models[0]),
+      system: withSearchSystem(options.system, withTools),
       messages,
+      ...toolSettings(withTools),
     });
 
   async function* textStream() {
     const release = acquireAiLock();
     try {
-      if (useTools) {
-        let lastError: unknown;
-        const prompt = messages.map((m) => `${m.role}: ${m.content}`).join("\n\n");
-        for (const modelId of models) {
-          try {
-            const text = await generateWithBackoff(google, modelId, {
-              system: options.system,
-              prompt,
-              useTools: true,
-            });
-            if (text) yield text;
-            return;
-          } catch (error) {
-            lastError = error;
-            if (isRateLimited(error)) throw toHttpError(error);
-            if (isMissingModel(error) || isTransient(error)) continue;
-            throw toHttpError(error);
-          }
-        }
-        throw toHttpError(lastError);
-      }
-
       let received = false;
       try {
-        for await (const delta of openStream().textStream) {
+        for await (const delta of openStream(useTools).textStream) {
           received = true;
           yield delta;
         }
       } catch (error) {
-        if (received || !(isRateLimited(error) || isTransient(error))) {
+        if (received) throw toHttpError(error);
+        if (useTools && isToolRequestFailure(error)) {
+          for await (const delta of openStream(false).textStream) {
+            yield delta;
+          }
+          return;
+        }
+        if (!(isRateLimited(error) || isTransient(error))) {
           throw toHttpError(error);
         }
         await sleep(STREAM_RETRY_MS);
-        for await (const delta of openStream().textStream) {
+        for await (const delta of openStream(useTools).textStream) {
           yield delta;
         }
       }

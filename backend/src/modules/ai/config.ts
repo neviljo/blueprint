@@ -8,6 +8,13 @@ export function getAiApiKey(): string {
   return process.env.AI_API_KEY?.trim() ?? "";
 }
 
+export function getAiBaseUrl(): string {
+  return (
+    process.env.AI_BASE_URL?.trim() ||
+    "https://generativelanguage.googleapis.com/v1beta/openai"
+  );
+}
+
 export function getTavilyApiKey(): string {
   return process.env.TAVILY_API_KEY?.trim() ?? "";
 }
