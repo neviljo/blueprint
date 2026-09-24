@@ -5,7 +5,7 @@ import { z } from "zod";
 
 import { requireAuth } from "../auth/middleware.js";
 import { HttpError } from "../errors.js";
-import { getAiModels, isAiConfigured } from "./config.js";
+import { getAiModels, getAiProvider, isAiConfigured } from "./config.js";
 import { completeText, startTextStream } from "./llm.js";
 import { extractMermaid, stripMermaidFences } from "./mermaid.js";
 import {
@@ -43,6 +43,7 @@ const summarizeSchema = z.object({
 router.get("/health", requireAuth, (c) => {
   return c.json({
     configured: isAiConfigured() && getAiModels().length > 0,
+    provider: getAiProvider(),
     models: getAiModels(),
   });
 });

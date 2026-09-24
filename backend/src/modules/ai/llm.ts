@@ -1,18 +1,27 @@
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
-import { APICallError, generateText, stepCountIs, streamText } from "ai";
+import { createGroq } from "@ai-sdk/groq";
+import { APICallError, generateText, stepCountIs, streamText, type LanguageModel } from "ai";
 
 import { HttpError } from "../errors.js";
-import { getAiApiKey, getAiModels, isAiConfigured, isTavilyConfigured } from "./config.js";
+import {
+  getAiApiKey,
+  getAiModels,
+  getAiProvider,
+  getGroqApiKey,
+  isAiConfigured,
+  isTavilyConfigured,
+} from "./config.js";
 import { acquireAiLock } from "./lock.js";
 import { SEARCH_RULES } from "./prompts.js";
 import { tavilySearchTools } from "./tavily.js";
 
 const BACKOFF_MS = [1000, 2000];
 
-function provider() {
-  return createGoogleGenerativeAI({
-    apiKey: getAiApiKey(),
-  });
+function languageModel(modelId: string): LanguageModel {
+  if (getAiProvider() === "groq") {
+    return createGroq({ apiKey: getGroqApiKey() })(modelId);
+  }
+  return createGoogleGenerativeAI({ apiKey: getAiApiKey() })(modelId);
 }
 
 function withSearchSystem(system: string, useTools: boolean): string {
@@ -72,10 +81,17 @@ function shouldTryNextModel(error: unknown): boolean {
   return isRateLimited(error) || isMissingModel(error) || isTransient(error);
 }
 
+function missingKeyMessage(): string {
+  return getAiProvider() === "groq"
+    ? "AI is not configured. Set GROQ_API_KEY."
+    : "AI is not configured. Set AI_API_KEY.";
+}
+
 function toHttpError(error: unknown): HttpError {
   if (error instanceof HttpError) return error;
   if (isRateLimited(error)) {
-    return new HttpError(429, "Gemini Free tier rate limit. Wait a minute and try again.");
+    const name = getAiProvider() === "groq" ? "Groq" : "Gemini";
+    return new HttpError(429, `${name} rate limit. Wait a minute and try again.`);
   }
   if (APICallError.isInstance(error)) {
     const status = error.statusCode ?? 502;
@@ -95,7 +111,6 @@ function toHttpError(error: unknown): HttpError {
 }
 
 async function generateWithBackoff(
-  google: ReturnType<typeof createGoogleGenerativeAI>,
   modelId: string,
   options: {
     system: string;
@@ -109,7 +124,7 @@ async function generateWithBackoff(
     if (attempt > 0) await sleep(BACKOFF_MS[attempt - 1]);
     try {
       const result = await generateText({
-        model: google(modelId),
+        model: languageModel(modelId),
         system: withSearchSystem(options.system, options.useTools),
         prompt: options.prompt,
         maxRetries: 0,
@@ -119,7 +134,7 @@ async function generateWithBackoff(
     } catch (error) {
       lastError = error;
       if (options.useTools && isToolRequestFailure(error)) {
-        return generateWithBackoff(google, modelId, { ...options, useTools: false });
+        return generateWithBackoff(modelId, { ...options, useTools: false });
       }
       if (isRateLimited(error) || isMissingModel(error)) throw error;
       if (isTransient(error)) continue;
@@ -135,21 +150,20 @@ export async function completeText(options: {
   allowTools?: boolean;
 }): Promise<string> {
   if (!isAiConfigured()) {
-    throw new HttpError(503, "AI is not configured. Set AI_API_KEY.");
+    throw new HttpError(503, missingKeyMessage());
   }
   const models = getAiModels();
   if (models.length === 0) {
-    throw new HttpError(503, "AI is not configured. Set AI_MODEL or AI_MODELS.");
+    throw new HttpError(503, "AI is not configured. Set AI_MODEL, AI_MODELS, or GROQ_MODEL.");
   }
 
   const release = acquireAiLock();
   try {
-    const google = provider();
     const useTools = options.allowTools !== false && isTavilyConfigured();
     let lastError: unknown;
     for (const modelId of models) {
       try {
-        return await generateWithBackoff(google, modelId, { ...options, useTools });
+        return await generateWithBackoff(modelId, { ...options, useTools });
       } catch (error) {
         lastError = error;
         if (shouldTryNextModel(error)) continue;
@@ -168,14 +182,13 @@ export async function startTextStream(options: {
   allowTools?: boolean;
 }) {
   if (!isAiConfigured()) {
-    throw new HttpError(503, "AI is not configured. Set AI_API_KEY.");
+    throw new HttpError(503, missingKeyMessage());
   }
   const models = getAiModels();
   if (models.length === 0) {
-    throw new HttpError(503, "AI is not configured. Set AI_MODEL or AI_MODELS.");
+    throw new HttpError(503, "AI is not configured. Set AI_MODEL, AI_MODELS, or GROQ_MODEL.");
   }
 
-  const google = provider();
   const useTools = options.allowTools !== false && isTavilyConfigured();
   const messages = options.messages.map((message) => ({
     role: message.role,
@@ -190,7 +203,7 @@ export async function startTextStream(options: {
         const prompt = messages.map((m) => `${m.role}: ${m.content}`).join("\n\n");
         for (const modelId of models) {
           try {
-            const text = await generateWithBackoff(google, modelId, {
+            const text = await generateWithBackoff(modelId, {
               system: options.system,
               prompt,
               useTools: true,
@@ -211,7 +224,7 @@ export async function startTextStream(options: {
         let yielded = false;
         try {
           const stream = streamText({
-            model: google(modelId),
+            model: languageModel(modelId),
             system: options.system,
             messages,
             maxRetries: 0,
