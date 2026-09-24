@@ -1105,7 +1105,9 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
                   try {
                     const mermaid = await generateDiagram(value, false, useSearch);
                     return { generatedResponse: mermaid };
-                  } catch {
+                  } catch (error) {
+                    const message = error instanceof Error ? error.message : "";
+                    if (/rate limit|in progress|429/i.test(message)) throw error;
                     const mermaid = await generateDiagram(value, true, useSearch);
                     return { generatedResponse: mermaid };
                   }

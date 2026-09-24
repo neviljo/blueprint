@@ -79,9 +79,9 @@ router.post("/chat", requireAuth, zValidator("json", chatSchema), async (c) => {
   });
 });
 
-router.post("/chat/stream", requireAuth, zValidator("json", chatSchema), (c) => {
+router.post("/chat/stream", requireAuth, zValidator("json", chatSchema), async (c) => {
   const { messages, dump, useSearch } = c.req.valid("json");
-  const result = startTextStream({
+  const result = await startTextStream({
     system: `${CHAT_SYSTEM}\n\nDiagram dump:\n${dump || "(empty)"}`,
     messages,
     useSearch,
@@ -104,9 +104,9 @@ router.post("/summarize", requireAuth, zValidator("json", summarizeSchema), asyn
   return c.json({ reply: text.trim() });
 });
 
-router.post("/summarize/stream", requireAuth, zValidator("json", summarizeSchema), (c) => {
+router.post("/summarize/stream", requireAuth, zValidator("json", summarizeSchema), async (c) => {
   const { dump } = c.req.valid("json");
-  const result = startTextStream({
+  const result = await startTextStream({
     system: SUMMARIZE_SYSTEM,
     messages: [{ role: "user", content: dump }],
   });
