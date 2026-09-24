@@ -80,10 +80,9 @@ function callSettings(options: {
   tools?: ReturnType<typeof tavilySearchTools>;
 }) {
   const tools = options.tools;
-  return {
-    timeout: tools ? 90_000 : 60_000,
-    ...(tools ? { tools, stopWhen: stepCountIs(4) } : {}),
-  };
+  return tools
+    ? { tools, stopWhen: stepCountIs(6), maxRetries: 0 }
+    : { maxRetries: 1 };
 }
 
 async function generateWithBackoff(
@@ -188,6 +187,32 @@ export async function startTextStream(options: {
 
   async function* textStream() {
     try {
+      // Gemini streaming + function calls often yields no text or 400s.
+      // Run tool rounds with generateText, then emit the final answer.
+      if (tools) {
+        let lastError: unknown;
+        for (const modelId of models) {
+          try {
+            const result = await generateWithBackoff(google, modelId, {
+              system: options.system,
+              prompt: messages
+                .map((message) => `${message.role}: ${message.content}`)
+                .join("\n\n"),
+              useSearch: options.useSearch,
+              tools,
+            });
+            if (result) yield result;
+            return;
+          } catch (error) {
+            lastError = error;
+            if (isRateLimited(error)) throw toHttpError(error);
+            if (isMissingModel(error) || isTransient(error)) continue;
+            throw toHttpError(error);
+          }
+        }
+        throw toHttpError(lastError);
+      }
+
       let received = false;
       try {
         for await (const delta of openStream().textStream) {

@@ -5,7 +5,7 @@ import { z } from "zod";
 
 import { requireAuth } from "../auth/middleware.js";
 import { HttpError } from "../errors.js";
-import { getAiModels, isAiConfigured } from "./config.js";
+import { getAiModels, isAiConfigured, isTavilyConfigured } from "./config.js";
 import { completeText, startTextStream } from "./llm.js";
 import { extractMermaid, stripMermaidFences } from "./mermaid.js";
 import {
@@ -44,6 +44,7 @@ router.get("/health", requireAuth, (c) => {
   return c.json({
     configured: isAiConfigured() && getAiModels().length > 0,
     models: getAiModels(),
+    searchConfigured: isTavilyConfigured(),
   });
 });
 
