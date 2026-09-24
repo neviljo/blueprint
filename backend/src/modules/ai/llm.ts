@@ -80,9 +80,7 @@ function callSettings(options: {
   tools?: ReturnType<typeof tavilySearchTools>;
 }) {
   const tools = options.tools;
-  return tools
-    ? { tools, stopWhen: stepCountIs(6), maxRetries: 0 }
-    : { maxRetries: 1 };
+  return tools ? { tools, stopWhen: stepCountIs(6) } : {};
 }
 
 async function generateWithBackoff(
@@ -169,7 +167,6 @@ export async function startTextStream(options: {
   }
 
   requireSearchReady(options.useSearch);
-  const release = acquireAiLock();
   const google = provider();
   const tools = options.useSearch ? tavilySearchTools() : undefined;
   const messages = options.messages.map((message) => ({
@@ -186,6 +183,7 @@ export async function startTextStream(options: {
     });
 
   async function* textStream() {
+    const release = acquireAiLock();
     try {
       // Gemini streaming + function calls often yields no text or 400s.
       // Run tool rounds with generateText, then emit the final answer.
