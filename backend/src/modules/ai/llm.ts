@@ -1,14 +1,25 @@
-import { createOpenAI } from "@ai-sdk/openai";
+import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { APICallError, generateText, streamText } from "ai";
 
 import { HttpError } from "../errors.js";
-import { getAiApiKey, getAiBaseUrl, getAiModels, isAiConfigured } from "./config.js";
+import { getAiApiKey, getAiModels, isAiConfigured } from "./config.js";
+import { SEARCH_RULES } from "./prompts.js";
 
 function provider() {
-  return createOpenAI({
+  return createGoogleGenerativeAI({
     apiKey: getAiApiKey(),
-    baseURL: getAiBaseUrl(),
   });
+}
+
+function withSearchSystem(system: string, useSearch: boolean | undefined): string {
+  if (!useSearch) return system;
+  return `${system}\n\n${SEARCH_RULES}`;
+}
+
+function searchTools(google: ReturnType<typeof createGoogleGenerativeAI>) {
+  return {
+    google_search: google.tools.googleSearch({}),
+  };
 }
 
 function isProviderFailure(error: unknown): boolean {
@@ -49,6 +60,7 @@ function toHttpError(error: unknown): HttpError {
 export async function completeText(options: {
   system: string;
   prompt: string;
+  useSearch?: boolean;
 }): Promise<string> {
   if (!isAiConfigured()) {
     throw new HttpError(503, "AI is not configured. Set AI_API_KEY.");
@@ -58,15 +70,17 @@ export async function completeText(options: {
     throw new HttpError(503, "AI is not configured. Set AI_MODEL or AI_MODELS.");
   }
 
-  const openai = provider();
+  const google = provider();
+  const tools = options.useSearch ? searchTools(google) : undefined;
   let lastError: unknown;
   for (const modelId of models) {
     try {
       const result = await generateText({
-        model: openai.chat(modelId),
-        system: options.system,
+        model: google(modelId),
+        system: withSearchSystem(options.system, options.useSearch),
         prompt: options.prompt,
         timeout: 60_000,
+        ...(tools ? { tools } : {}),
       });
       return result.text;
     } catch (error) {
@@ -82,6 +96,7 @@ export async function completeText(options: {
 export function startTextStream(options: {
   system: string;
   messages: { role: "user" | "assistant"; content: string }[];
+  useSearch?: boolean;
 }) {
   if (!isAiConfigured()) {
     throw new HttpError(503, "AI is not configured. Set AI_API_KEY.");
@@ -91,14 +106,16 @@ export function startTextStream(options: {
     throw new HttpError(503, "AI is not configured. Set AI_MODEL or AI_MODELS.");
   }
 
-  const openai = provider();
+  const google = provider();
+  const tools = options.useSearch ? searchTools(google) : undefined;
   return streamText({
-    model: openai.chat(models[0]),
-    system: options.system,
+    model: google(models[0]),
+    system: withSearchSystem(options.system, options.useSearch),
     messages: options.messages.map((message) => ({
       role: message.role,
       content: message.content,
     })),
     timeout: 60_000,
+    ...(tools ? { tools } : {}),
   });
 }

@@ -20,6 +20,7 @@ const router = new Hono();
 const diagramSchema = z.object({
   prompt: z.string().min(1),
   repair: z.boolean().optional(),
+  useSearch: z.boolean().optional(),
 });
 
 const chatSchema = z.object({
@@ -32,6 +33,7 @@ const chatSchema = z.object({
     )
     .min(1),
   dump: z.string().optional(),
+  useSearch: z.boolean().optional(),
 });
 
 const summarizeSchema = z.object({
@@ -46,10 +48,11 @@ router.get("/health", requireAuth, (c) => {
 });
 
 router.post("/diagram", requireAuth, zValidator("json", diagramSchema), async (c) => {
-  const { prompt, repair } = c.req.valid("json");
+  const { prompt, repair, useSearch } = c.req.valid("json");
   const text = await completeText({
     system: repair ? GENERATE_REPAIR_SYSTEM : GENERATE_SYSTEM,
     prompt,
+    useSearch,
   });
   const mermaid = extractMermaid(text);
   if (!mermaid) {
@@ -59,7 +62,7 @@ router.post("/diagram", requireAuth, zValidator("json", diagramSchema), async (c
 });
 
 router.post("/chat", requireAuth, zValidator("json", chatSchema), async (c) => {
-  const { messages, dump } = c.req.valid("json");
+  const { messages, dump, useSearch } = c.req.valid("json");
   const prompt = [
     dump ? `Diagram dump:\n${dump}` : "Diagram dump: (empty)",
     ...messages.map((m) => `${m.role}: ${m.content}`),
@@ -67,6 +70,7 @@ router.post("/chat", requireAuth, zValidator("json", chatSchema), async (c) => {
   const text = await completeText({
     system: CHAT_SYSTEM,
     prompt,
+    useSearch,
   });
   const mermaid = extractMermaid(text);
   return c.json({
@@ -76,10 +80,11 @@ router.post("/chat", requireAuth, zValidator("json", chatSchema), async (c) => {
 });
 
 router.post("/chat/stream", requireAuth, zValidator("json", chatSchema), (c) => {
-  const { messages, dump } = c.req.valid("json");
+  const { messages, dump, useSearch } = c.req.valid("json");
   const result = startTextStream({
     system: `${CHAT_SYSTEM}\n\nDiagram dump:\n${dump || "(empty)"}`,
     messages,
+    useSearch,
   });
   c.header("Cache-Control", "no-cache, no-transform");
   c.header("X-Accel-Buffering", "no");

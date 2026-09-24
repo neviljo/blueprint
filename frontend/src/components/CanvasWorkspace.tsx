@@ -26,6 +26,7 @@ import { canvasApi } from "../lib/api";
 import type { CanvasContent } from "../lib/types";
 import { getCurrentSession } from "../lib/auth";
 import { generateDiagram } from "../lib/ai";
+import { getAiSession } from "../lib/aiSession";
 import AiPanel from "./AiPanel";
 
 interface CanvasWorkspaceProps {
@@ -1100,11 +1101,12 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
             <TTDDialog
               onTextSubmit={async (value) => {
                 try {
+                  const useSearch = getAiSession(canvasId).useSearch;
                   try {
-                    const mermaid = await generateDiagram(value);
+                    const mermaid = await generateDiagram(value, false, useSearch);
                     return { generatedResponse: mermaid };
                   } catch {
-                    const mermaid = await generateDiagram(value, true);
+                    const mermaid = await generateDiagram(value, true, useSearch);
                     return { generatedResponse: mermaid };
                   }
                 } catch (error) {

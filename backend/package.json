@@ -10,7 +10,7 @@
     "db:push": "drizzle-kit push"
   },
   "dependencies": {
-    "@ai-sdk/openai": "^4.0.65",
+    "@ai-sdk/google": "4.0.67",
     "@hono/node-server": "^2.0.11",
     "@hono/zod-validator": "^0.9.0",
     "ably": "^2.27.0",

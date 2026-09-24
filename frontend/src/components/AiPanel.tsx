@@ -118,7 +118,10 @@ export default function AiPanel({ tab, canvasId, getApi }: AiPanelProps) {
     try {
       let streamed = "";
       const payload = history.map((turn) => ({ role: turn.role, content: turn.content }));
-      const done = await streamAi("/api/ai/chat/stream", { messages: payload, dump }, (token) => {
+      const done = await streamAi(
+        "/api/ai/chat/stream",
+        { messages: payload, dump, useSearch: session.useSearch },
+        (token) => {
         streamed += token;
         patchAiSession(canvasId, {
           chatTurns: [...history, { role: "assistant", content: streamed, pending: true }],
@@ -150,7 +153,15 @@ export default function AiPanel({ tab, canvasId, getApi }: AiPanelProps) {
     } finally {
       setChatBusy(false);
     }
-  }, [canvasId, chatBusy, chatInput, getApi, session.chatTurns, session.selectionOnly]);
+  }, [
+    canvasId,
+    chatBusy,
+    chatInput,
+    getApi,
+    session.chatTurns,
+    session.selectionOnly,
+    session.useSearch,
+  ]);
 
   const handleApply = useCallback(
     async (turnIndex: number) => {
@@ -247,6 +258,14 @@ export default function AiPanel({ tab, canvasId, getApi }: AiPanelProps) {
             onChange={(e) => patchAiSession(canvasId, { selectionOnly: e.target.checked })}
           />
           Use selection only
+        </label>
+        <label className="blueprint-ai-check" title="Allows Google Search when you ask for latest stacks or trends. Off by default.">
+          <input
+            type="checkbox"
+            checked={session.useSearch}
+            onChange={(e) => patchAiSession(canvasId, { useSearch: e.target.checked })}
+          />
+          Use latest web info
         </label>
 
         {tab === "chat" && (
