@@ -6,10 +6,13 @@ export interface ChatTurn {
   pending?: boolean;
 }
 
+export type AiProviderChoice = "google" | "groq";
+
 export interface AiSession {
   chatTurns: ChatTurn[];
   summarizeTurns: ChatTurn[];
   selectionOnly: boolean;
+  provider?: AiProviderChoice;
 }
 
 const sessions = new Map<string, AiSession>();

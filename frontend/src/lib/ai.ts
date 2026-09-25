@@ -1,7 +1,11 @@
 import { extractMermaid, stripMermaidFences } from "./mermaidParse";
 
+export type AiProviderId = "google" | "groq";
+
 export interface AiHealth {
   configured: boolean;
+  provider?: AiProviderId;
+  providers?: { google: boolean; groq: boolean };
   models: string[];
 }
 
@@ -27,12 +31,12 @@ export async function getAiHealth(): Promise<AiHealth> {
   return response.json() as Promise<AiHealth>;
 }
 
-export async function summarizeDiagram(dump: string): Promise<string> {
+export async function summarizeDiagram(dump: string, provider?: AiProviderId): Promise<string> {
   const response = await fetch("/api/ai/summarize", {
     method: "POST",
     credentials: "include",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ dump }),
+    body: JSON.stringify({ dump, provider }),
   });
   if (!response.ok) {
     throw new Error(await parseError(response));
@@ -41,12 +45,16 @@ export async function summarizeDiagram(dump: string): Promise<string> {
   return data.reply;
 }
 
-export async function generateDiagram(prompt: string, repair = false): Promise<string> {
+export async function generateDiagram(
+  prompt: string,
+  repair = false,
+  provider?: AiProviderId
+): Promise<string> {
   const response = await fetch("/api/ai/diagram", {
     method: "POST",
     credentials: "include",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt, repair }),
+    body: JSON.stringify({ prompt, repair, provider }),
   });
   if (!response.ok) {
     throw new Error(await parseError(response));

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { ExcalidrawImperativeAPI } from "@excalidraw/excalidraw/types";
-import { getAiHealth, streamAi, summarizeDiagram } from "../lib/ai";
+import { getAiHealth, streamAi, summarizeDiagram, type AiProviderId } from "../lib/ai";
 import { dumpElements, sceneElementIds } from "../lib/dumpElements";
 import { insertGeneratedElements } from "../lib/insertGeneratedElements";
 import { mermaidToElements } from "../lib/mermaidToScene";
@@ -45,6 +45,10 @@ export default function AiPanel({ tab, canvasId, getApi }: AiPanelProps) {
   );
   const [configured, setConfigured] = useState<boolean | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
+  const [providers, setProviders] = useState<{ google: boolean; groq: boolean }>({
+    google: false,
+    groq: false,
+  });
   const [chatInput, setChatInput] = useState("");
   const [chatBusy, setChatBusy] = useState(false);
   const [summarizeBusy, setSummarizeBusy] = useState(false);
@@ -60,6 +64,21 @@ export default function AiPanel({ tab, canvasId, getApi }: AiPanelProps) {
         if (!cancelled) {
           setConfigured(health.configured);
           setHealthError(null);
+          const nextProviders = health.providers ?? {
+            google: health.configured,
+            groq: health.configured,
+          };
+          setProviders(nextProviders);
+          const current = getAiSession(canvasId).provider;
+          if (!current) {
+            const fallback: AiProviderId =
+              health.provider === "groq" && nextProviders.groq
+                ? "groq"
+                : nextProviders.google
+                  ? "google"
+                  : "groq";
+            patchAiSession(canvasId, { provider: fallback });
+          }
         }
       })
       .catch((error: Error) => {
@@ -71,7 +90,7 @@ export default function AiPanel({ tab, canvasId, getApi }: AiPanelProps) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [canvasId]);
 
   const onTranscriptScroll = useCallback((event: { currentTarget: HTMLDivElement }) => {
     const node = event.currentTarget;
@@ -120,7 +139,7 @@ export default function AiPanel({ tab, canvasId, getApi }: AiPanelProps) {
       const payload = history.map((turn) => ({ role: turn.role, content: turn.content }));
       const done = await streamAi(
         "/api/ai/chat/stream",
-        { messages: payload, dump },
+        { messages: payload, dump, provider: session.provider },
         (token) => {
         streamed += token;
         patchAiSession(canvasId, {
@@ -159,6 +178,7 @@ export default function AiPanel({ tab, canvasId, getApi }: AiPanelProps) {
     chatInput,
     getApi,
     session.chatTurns,
+    session.provider,
     session.selectionOnly,
   ]);
 
@@ -214,7 +234,7 @@ export default function AiPanel({ tab, canvasId, getApi }: AiPanelProps) {
     patchAiSession(canvasId, { summarizeTurns: pending });
     try {
       const { dump } = currentDump(api, session.selectionOnly);
-      const reply = await summarizeDiagram(dump);
+      const reply = await summarizeDiagram(dump, session.provider);
       patchAiSession(canvasId, {
         summarizeTurns: [...history, { role: "assistant", content: reply, pending: false }],
       });
@@ -224,7 +244,7 @@ export default function AiPanel({ tab, canvasId, getApi }: AiPanelProps) {
     } finally {
       setSummarizeBusy(false);
     }
-  }, [canvasId, getApi, session.selectionOnly, session.summarizeTurns, summarizeBusy]);
+  }, [canvasId, getApi, session.provider, session.selectionOnly, session.summarizeTurns, summarizeBusy]);
 
   if (configured === null) {
     return <div className="blueprint-ai-sidebar__body">Loading AI…</div>;
@@ -244,14 +264,28 @@ export default function AiPanel({ tab, canvasId, getApi }: AiPanelProps) {
   return (
     <div className="blueprint-ai-sidebar">
       <div className="blueprint-ai-sidebar__body">
-        <label className="blueprint-ai-check">
-          <input
-            type="checkbox"
-            checked={session.selectionOnly}
-            onChange={(e) => patchAiSession(canvasId, { selectionOnly: e.target.checked })}
-          />
-          Use selection only
-        </label>
+        <div className="blueprint-ai-sidebar__controls">
+          <label className="blueprint-ai-sidebar__provider">
+            Model
+            <select
+              value={session.provider ?? (providers.groq ? "groq" : "google")}
+              onChange={(e) =>
+                patchAiSession(canvasId, { provider: e.target.value as AiProviderId })
+              }
+            >
+              {providers.google ? <option value="google">Gemini</option> : null}
+              {providers.groq ? <option value="groq">Groq</option> : null}
+            </select>
+          </label>
+          <label className="blueprint-ai-check">
+            <input
+              type="checkbox"
+              checked={session.selectionOnly}
+              onChange={(e) => patchAiSession(canvasId, { selectionOnly: e.target.checked })}
+            />
+            Use selection only
+          </label>
+        </div>
         {tab === "chat" && (
           <>
             <div

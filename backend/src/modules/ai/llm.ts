@@ -9,7 +9,10 @@ import {
   getAiProvider,
   getGroqApiKey,
   isAiConfigured,
+  isProviderConfigured,
   isTavilyConfigured,
+  resolveProvider,
+  type AiProvider,
 } from "./config.js";
 import { acquireAiLock } from "./lock.js";
 import { SEARCH_RULES } from "./prompts.js";
@@ -17,8 +20,8 @@ import { tavilySearchTools } from "./tavily.js";
 
 const BACKOFF_MS = [1000, 2000];
 
-function languageModel(modelId: string): LanguageModel {
-  if (getAiProvider() === "groq") {
+function languageModel(modelId: string, provider: AiProvider): LanguageModel {
+  if (provider === "groq") {
     return createGroq({ apiKey: getGroqApiKey() })(modelId);
   }
   return createGoogleGenerativeAI({ apiKey: getAiApiKey() })(modelId);
@@ -82,17 +85,31 @@ function shouldTryNextModel(error: unknown): boolean {
   return isRateLimited(error) || isMissingModel(error) || isTransient(error);
 }
 
-function missingKeyMessage(): string {
-  return getAiProvider() === "groq"
-    ? "AI is not configured. Set GROQ_API_KEY."
-    : "AI is not configured. Set AI_API_KEY.";
+function providerLabel(provider: AiProvider): string {
+  return provider === "groq" ? "Groq" : "Gemini";
 }
 
-function toHttpError(error: unknown): HttpError {
+function missingKeyMessage(provider: AiProvider): string {
+  return provider === "groq"
+    ? "Groq is not configured. Set GROQ_API_KEY."
+    : "Gemini is not configured. Set AI_API_KEY.";
+}
+
+function missingModelMessage(modelId: string, provider: AiProvider): HttpError {
+  return new HttpError(
+    404,
+    `Model "${modelId}" does not exist on ${provider}. ${
+      provider === "groq"
+        ? "Set GROQ_MODEL to a chat model (e.g. llama-3.1-8b-instant)."
+        : "Set AI_MODEL to a Gemini chat model."
+    }`
+  );
+}
+
+function toHttpError(error: unknown, provider: AiProvider): HttpError {
   if (error instanceof HttpError) return error;
   if (isRateLimited(error)) {
-    const name = getAiProvider() === "groq" ? "Groq" : "Gemini";
-    return new HttpError(429, `${name} rate limit. Wait a minute and try again.`);
+    return new HttpError(429, `${providerLabel(provider)} rate limit. Wait a minute and try again.`);
   }
   if (APICallError.isInstance(error)) {
     const status = error.statusCode ?? 502;
@@ -111,8 +128,26 @@ function toHttpError(error: unknown): HttpError {
   );
 }
 
+function requireProvider(requested?: string | null): AiProvider {
+  const provider = resolveProvider(requested);
+  if (!isProviderConfigured(provider)) {
+    throw new HttpError(503, missingKeyMessage(provider));
+  }
+  const models = getAiModels(provider);
+  if (models.length === 0) {
+    throw new HttpError(
+      503,
+      provider === "groq"
+        ? "AI is not configured. Set GROQ_MODEL."
+        : "AI is not configured. Set AI_MODEL or AI_MODELS."
+    );
+  }
+  return provider;
+}
+
 async function generateWithBackoff(
   modelId: string,
+  provider: AiProvider,
   options: {
     system: string;
     prompt: string;
@@ -125,7 +160,7 @@ async function generateWithBackoff(
     if (attempt > 0) await sleep(BACKOFF_MS[attempt - 1]);
     try {
       const result = await generateText({
-        model: languageModel(modelId),
+        model: languageModel(modelId, provider),
         system: withSearchSystem(options.system, options.useTools),
         prompt: options.prompt,
         maxRetries: 0,
@@ -135,13 +170,78 @@ async function generateWithBackoff(
     } catch (error) {
       lastError = error;
       if (isMissingModel(error)) {
-        throw new HttpError(
-          404,
-          `Model "${modelId}" does not exist on ${getAiProvider()}. Set GROQ_MODEL to a chat model (e.g. llama-3.1-8b-instant).`
-        );
+        throw missingModelMessage(modelId, provider);
       }
       if (options.useTools && isToolRequestFailure(error)) {
-        return generateWithBackoff(modelId, { ...options, useTools: false });
+        return generateWithBackoff(modelId, provider, { ...options, useTools: false });
+      }
+      if (isRateLimited(error)) throw error;
+      if (isTransient(error)) continue;
+      throw error;
+    }
+  }
+  throw lastError;
+}
+
+function textFromDelta(part: { type: string; text?: string; delta?: string }): string {
+  if (part.type !== "text-delta") return "";
+  if (typeof part.text === "string" && part.text) return part.text;
+  if (typeof part.delta === "string" && part.delta) return part.delta;
+  return "";
+}
+
+async function* streamWithBackoff(
+  modelId: string,
+  provider: AiProvider,
+  options: {
+    system: string;
+    messages: { role: "user" | "assistant"; content: string }[];
+    useTools: boolean;
+  }
+): AsyncGenerator<string> {
+  let lastError: unknown;
+  const attempts = BACKOFF_MS.length + 1;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    if (attempt > 0) await sleep(BACKOFF_MS[attempt - 1]);
+    let yielded = false;
+    try {
+      const stream = streamText({
+        model: languageModel(modelId, provider),
+        system: withSearchSystem(options.system, options.useTools),
+        messages: options.messages,
+        maxRetries: 0,
+        ...toolSettings(options.useTools),
+      });
+      for await (const part of stream.fullStream) {
+        if (part.type === "error") {
+          throw "error" in part && part.error ? part.error : new Error("Stream error");
+        }
+        const delta = textFromDelta(part);
+        if (delta) {
+          yielded = true;
+          yield delta;
+          continue;
+        }
+        if (
+          part.type === "tool-call" ||
+          part.type === "tool-result" ||
+          part.type === "start-step" ||
+          part.type === "finish-step" ||
+          part.type === "tool-input-start"
+        ) {
+          yield "";
+        }
+      }
+      return;
+    } catch (error) {
+      lastError = error;
+      if (yielded) throw toHttpError(error, provider);
+      if (isMissingModel(error)) {
+        throw missingModelMessage(modelId, provider);
+      }
+      if (options.useTools && isToolRequestFailure(error)) {
+        yield* streamWithBackoff(modelId, provider, { ...options, useTools: false });
+        return;
       }
       if (isRateLimited(error)) throw error;
       if (isTransient(error)) continue;
@@ -155,14 +255,13 @@ export async function completeText(options: {
   system: string;
   prompt: string;
   allowTools?: boolean;
+  provider?: string | null;
 }): Promise<string> {
   if (!isAiConfigured()) {
-    throw new HttpError(503, missingKeyMessage());
+    throw new HttpError(503, missingKeyMessage(getAiProvider()));
   }
-  const models = getAiModels();
-  if (models.length === 0) {
-    throw new HttpError(503, "AI is not configured. Set AI_MODEL, AI_MODELS, or GROQ_MODEL.");
-  }
+  const provider = requireProvider(options.provider);
+  const models = getAiModels(provider);
 
   const release = acquireAiLock();
   try {
@@ -170,14 +269,14 @@ export async function completeText(options: {
     let lastError: unknown;
     for (const modelId of models) {
       try {
-        return await generateWithBackoff(modelId, { ...options, useTools });
+        return await generateWithBackoff(modelId, provider, { ...options, useTools });
       } catch (error) {
         lastError = error;
         if (shouldTryNextModel(error)) continue;
-        throw toHttpError(error);
+        throw toHttpError(error, provider);
       }
     }
-    throw toHttpError(lastError);
+    throw toHttpError(lastError, provider);
   } finally {
     release();
   }
@@ -187,15 +286,13 @@ export async function startTextStream(options: {
   system: string;
   messages: { role: "user" | "assistant"; content: string }[];
   allowTools?: boolean;
+  provider?: string | null;
 }) {
   if (!isAiConfigured()) {
-    throw new HttpError(503, missingKeyMessage());
+    throw new HttpError(503, missingKeyMessage(getAiProvider()));
   }
-  const models = getAiModels();
-  if (models.length === 0) {
-    throw new HttpError(503, "AI is not configured. Set AI_MODEL, AI_MODELS, or GROQ_MODEL.");
-  }
-
+  const provider = requireProvider(options.provider);
+  const models = getAiModels(provider);
   const useTools = options.allowTools !== false && isTavilyConfigured();
   const messages = options.messages.map((message) => ({
     role: message.role,
@@ -205,50 +302,26 @@ export async function startTextStream(options: {
   async function* textStream() {
     const release = acquireAiLock();
     try {
-      if (useTools) {
-        let lastError: unknown;
-        const prompt = messages.map((m) => `${m.role}: ${m.content}`).join("\n\n");
-        for (const modelId of models) {
-          try {
-            const text = await generateWithBackoff(modelId, {
-              system: options.system,
-              prompt,
-              useTools: true,
-            });
-            if (text) yield text;
-            return;
-          } catch (error) {
-            lastError = error;
-            if (shouldTryNextModel(error)) continue;
-            throw toHttpError(error);
-          }
-        }
-        throw toHttpError(lastError);
-      }
-
       let lastError: unknown;
       for (const modelId of models) {
-        let yielded = false;
         try {
-          const stream = streamText({
-            model: languageModel(modelId),
+          yield* streamWithBackoff(modelId, provider, {
             system: options.system,
             messages,
-            maxRetries: 0,
+            useTools,
           });
-          for await (const delta of stream.textStream) {
-            yielded = true;
-            yield delta;
-          }
           return;
         } catch (error) {
           lastError = error;
-          if (yielded) throw toHttpError(error);
+          if (error instanceof HttpError && error.status === 404) {
+            if (shouldTryNextModel(error)) continue;
+            throw error;
+          }
           if (shouldTryNextModel(error)) continue;
-          throw toHttpError(error);
+          throw toHttpError(error, provider);
         }
       }
-      throw toHttpError(lastError);
+      throw toHttpError(lastError, provider);
     } finally {
       release();
     }

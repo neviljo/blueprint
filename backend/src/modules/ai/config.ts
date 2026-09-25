@@ -25,8 +25,22 @@ export function getAiProvider(): AiProvider {
   return "google";
 }
 
+export function isProviderConfigured(provider: AiProvider): boolean {
+  return provider === "groq" ? isGroqConfigured() : isGoogleConfigured();
+}
+
 export function isAiConfigured(): boolean {
-  return getAiProvider() === "groq" ? isGroqConfigured() : isGoogleConfigured();
+  return isGoogleConfigured() || isGroqConfigured();
+}
+
+export function resolveProvider(requested?: string | null): AiProvider {
+  const raw = requested?.trim().toLowerCase();
+  if (raw === "google" || raw === "gemini") return "google";
+  if (raw === "groq") return "groq";
+  const fallback = getAiProvider();
+  if (isProviderConfigured(fallback)) return fallback;
+  if (isGroqConfigured()) return "groq";
+  return "google";
 }
 
 export function getAiApiKey(): string {
@@ -54,8 +68,8 @@ function isGroqChatModel(id: string): boolean {
   return true;
 }
 
-export function getAiModels(): string[] {
-  if (getAiProvider() === "groq") {
+export function getAiModels(provider: AiProvider = getAiProvider()): string[] {
+  if (provider === "groq") {
     const groq = process.env.GROQ_MODEL?.trim() || process.env.GROQ_MODELS?.trim() || "";
     const fromEnv = splitModels(groq).filter(isGroqChatModel);
     if (fromEnv.length > 0) return fromEnv;

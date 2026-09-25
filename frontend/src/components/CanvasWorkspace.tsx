@@ -26,6 +26,7 @@ import { canvasApi } from "../lib/api";
 import type { CanvasContent } from "../lib/types";
 import { getCurrentSession } from "../lib/auth";
 import { generateDiagram } from "../lib/ai";
+import { getAiSession } from "../lib/aiSession";
 
 import AiPanel from "./AiPanel";
 
@@ -1102,12 +1103,13 @@ export default function CanvasWorkspace({ canvasId }: CanvasWorkspaceProps) {
               onTextSubmit={async (value) => {
                 try {
                   try {
-                    const mermaid = await generateDiagram(value, false);
+                    const provider = getAiSession(canvasId).provider;
+                    const mermaid = await generateDiagram(value, false, provider);
                     return { generatedResponse: mermaid };
                   } catch (error) {
                     const message = error instanceof Error ? error.message : "";
                     if (/rate limit|in progress|429/i.test(message)) throw error;
-                    const mermaid = await generateDiagram(value, true);
+                    const mermaid = await generateDiagram(value, true, getAiSession(canvasId).provider);
                     return { generatedResponse: mermaid };
                   }
                 } catch (error) {

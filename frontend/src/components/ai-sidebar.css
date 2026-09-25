@@ -146,6 +146,30 @@
   margin-top: 0.45rem;
 }
 
+.blueprint-ai-sidebar__controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.65rem 1rem;
+  flex-shrink: 0;
+}
+
+.blueprint-ai-sidebar__provider {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--text-primary-color);
+}
+
+.blueprint-ai-sidebar__provider select {
+  border: 1px solid var(--color-gray-20);
+  border-radius: 0.4rem;
+  padding: 0.25rem 0.4rem;
+  background: var(--island-bg-color);
+  color: var(--text-primary-color);
+  font: inherit;
+}
+
 .blueprint-ai-sidebar label.blueprint-ai-check {
   display: flex;
   align-items: center;
