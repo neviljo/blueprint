@@ -45,15 +45,20 @@ export function isTavilyConfigured(): boolean {
   return Boolean(getTavilyApiKey());
 }
 
+function isGroqChatModel(id: string): boolean {
+  const name = id.toLowerCase();
+  if (!name) return false;
+  if (name.startsWith("gemini")) return false;
+  if (name.includes("prompt-guard")) return false;
+  if (name.includes("whisper")) return false;
+  return true;
+}
+
 export function getAiModels(): string[] {
   if (getAiProvider() === "groq") {
     const groq = process.env.GROQ_MODEL?.trim() || process.env.GROQ_MODELS?.trim() || "";
-    if (groq) return splitModels(groq);
-    const shared = process.env.AI_MODELS?.trim() || process.env.AI_MODEL?.trim() || "";
-    const parts = splitModels(shared);
-    if (parts.length > 0 && !parts.some((id) => id.toLowerCase().startsWith("gemini"))) {
-      return parts;
-    }
+    const fromEnv = splitModels(groq).filter(isGroqChatModel);
+    if (fromEnv.length > 0) return fromEnv;
     return ["llama-3.1-8b-instant", "llama-3.3-70b-versatile"];
   }
   const raw = process.env.AI_MODELS?.trim() || process.env.AI_MODEL?.trim() || "";

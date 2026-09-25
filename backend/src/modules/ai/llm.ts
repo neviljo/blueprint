@@ -60,7 +60,8 @@ function isRateLimited(error: unknown): boolean {
 }
 
 function isMissingModel(error: unknown): boolean {
-  return statusOf(error) === 404;
+  if (statusOf(error) === 404) return true;
+  return /does not exist|model_not_found|not found|unknown model/i.test(errorText(error));
 }
 
 function isTransient(error: unknown): boolean {
@@ -133,10 +134,16 @@ async function generateWithBackoff(
       return result.text;
     } catch (error) {
       lastError = error;
+      if (isMissingModel(error)) {
+        throw new HttpError(
+          404,
+          `Model "${modelId}" does not exist on ${getAiProvider()}. Set GROQ_MODEL to a chat model (e.g. llama-3.1-8b-instant).`
+        );
+      }
       if (options.useTools && isToolRequestFailure(error)) {
         return generateWithBackoff(modelId, { ...options, useTools: false });
       }
-      if (isRateLimited(error) || isMissingModel(error)) throw error;
+      if (isRateLimited(error)) throw error;
       if (isTransient(error)) continue;
       throw error;
     }
